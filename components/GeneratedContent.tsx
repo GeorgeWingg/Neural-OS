@@ -346,6 +346,29 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
     if (!htmlContent || isLoading) return '';
     // Strip thought markers from content before rendering
     const cleanedContent = htmlContent.replace(/<!--THOUGHT-->[\s\S]*?<!--\/THOUGHT-->/g, '');
+
+    // Check if the content has any HTML tags
+    const hasHtml = /<[a-zA-Z]/.test(cleanedContent);
+
+    // If no HTML, wrap the text in a styled message (AI rejection or plain text response)
+    const bodyContent = hasHtml ? cleanedContent : `
+      <div style="
+        padding: 20px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        line-height: 1.6;
+        color: #374151;
+        background: #f9fafb;
+        border-radius: 8px;
+        border: 1px solid #e5e7eb;
+        white-space: pre-wrap;
+      ">
+        <div style="margin-bottom: 12px; font-weight: 600; color: #6b7280; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;">
+          AI Response
+        </div>
+        ${cleanedContent.trim().replace(/</g, '&lt;').replace(/>/g, '&gt;')}
+      </div>
+    `;
+
     return `<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8">
@@ -356,7 +379,7 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
 <script>${BRIDGE_SCRIPT}<\/script>
 </head>
 <body>
-${cleanedContent}
+${bodyContent}
 </body></html>`;
   }, [htmlContent, isLoading]);
 
