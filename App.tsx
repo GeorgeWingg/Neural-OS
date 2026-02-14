@@ -36,6 +36,7 @@ import {
   LLMConfig,
   SettingsSkillSchema,
   StyleConfig,
+  ViewportContext,
 } from './types';
 
 const SETTINGS_STORAGE_KEY = 'gemini-os-settings';
@@ -199,6 +200,7 @@ const App: React.FC = () => {
   const [cacheEligible, setCacheEligible] = useState(true);
 
   const abortControllerRef = React.useRef<AbortController | null>(null);
+  const contentViewportRef = React.useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(styleConfig));
@@ -322,6 +324,18 @@ const App: React.FC = () => {
     }
   }, [sessionId, styleConfig, llmConfig]);
 
+  const getTurnViewportContext = useCallback((): ViewportContext => {
+    const rect = contentViewportRef.current?.getBoundingClientRect();
+    const width = rect?.width ?? (typeof window !== 'undefined' ? window.innerWidth : 1280);
+    const height = rect?.height ?? (typeof window !== 'undefined' ? window.innerHeight : 720);
+    const devicePixelRatio = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    return {
+      width: Math.max(320, Math.round(width)),
+      height: Math.max(220, Math.round(height)),
+      devicePixelRatio,
+    };
+  }, []);
+
   const internalHandleLlmRequest = useCallback(
     async (historyForLlm: InteractionData[], config: StyleConfig) => {
       if (historyForLlm.length === 0) {
@@ -341,6 +355,7 @@ const App: React.FC = () => {
       const selectedSkillIds = selectedSkills.map((skill) => skill.id);
       const startedAt = Date.now();
       const appContext = historyForLlm[0]?.appContext || 'desktop_env';
+      const requestViewport = getTurnViewportContext();
 
       setActiveTraceId(traceId);
       setActiveUiSessionId(uiSessionId);
@@ -365,6 +380,7 @@ const App: React.FC = () => {
             llmConfig,
             sessionId,
             selectedSkills,
+            requestViewport,
             retryHint,
           );
 
@@ -481,7 +497,7 @@ const App: React.FC = () => {
         console.info('[SelfImprovement] Skill status transitions applied.', cycle.transitions);
       }
     },
-    [llmConfig, sessionId],
+    [llmConfig, sessionId, getTurnViewportContext],
   );
 
   // Initial load
@@ -795,7 +811,15 @@ const App: React.FC = () => {
         let content = '';
         try {
           const selectedSkills = retrieveSkills([interaction], 3);
-          const stream = streamAppContent([interaction], fastConfig, llmConfig, sessionId, selectedSkills);
+          const pregenViewport = getTurnViewportContext();
+          const stream = streamAppContent(
+            [interaction],
+            fastConfig,
+            llmConfig,
+            sessionId,
+            selectedSkills,
+            pregenViewport,
+          );
           for await (const chunk of stream) {
             content += chunk;
           }
@@ -814,6 +838,7 @@ const App: React.FC = () => {
     styleConfig.speedMode,
     llmConfig,
     sessionId,
+    getTurnViewportContext,
     activeApp?.id,
   ]);
 
@@ -838,7 +863,7 @@ const App: React.FC = () => {
         onExitToDesktop={handleCloseAppView}
         onGlobalPrompt={handleGlobalPrompt}
       >
-        <div className="w-full h-full relative">
+        <div ref={contentViewportRef} className="w-full h-full relative">
           {error && <div className="p-4 text-red-600 bg-red-100 rounded-md">{error}</div>}
 
           {activeApp?.id === SETTINGS_APP_DEFINITION.id ? (

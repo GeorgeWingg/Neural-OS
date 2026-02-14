@@ -10,6 +10,7 @@ import {
   LLMConfig,
   SettingsSkillSchema,
   StyleConfig,
+  ViewportContext,
 } from '../types';
 
 export interface LlmCatalogProvider {
@@ -148,6 +149,7 @@ export async function generateSettingsSchema(
 function buildUserMessage(
   interactionHistory: InteractionData[],
   styleConfig: StyleConfig,
+  viewportContext: ViewportContext,
   retryHint?: string,
 ): string {
   const currentInteraction = interactionHistory[0];
@@ -192,11 +194,47 @@ function buildUserMessage(
     });
   }
 
+  const appContext = currentInteraction.appContext || 'desktop_env';
+  const viewportWidth = Math.max(320, Math.round(viewportContext.width));
+  const viewportHeight = Math.max(220, Math.round(viewportContext.height));
+  const viewportDpr = Number(viewportContext.devicePixelRatio || 1).toFixed(2);
+
+  let appLayoutPolicy = '- Default policy: use a responsive layout that can scroll vertically when content exceeds the viewport.';
+  if (appContext === 'desktop_env') {
+    appLayoutPolicy =
+      '- Desktop policy: fill the viewport like a desktop canvas. Avoid unnecessary page-level scroll; use internal panels for overflow when possible.';
+  } else if (
+    appContext === 'gallery_app' ||
+    appContext === 'documents' ||
+    appContext === 'web_browser_app' ||
+    appContext === 'videos_app'
+  ) {
+    appLayoutPolicy =
+      '- Content-heavy policy: vertical scroll is expected. Keep root min-height at least viewport height and allow additional content below the fold.';
+  } else if (appContext === 'calculator_app' || appContext === 'calendar_app') {
+    appLayoutPolicy =
+      '- Utility app policy: keep UI compact but still anchor inside a viewport-filling shell. Avoid making the overall page shorter than viewport height.';
+  } else if (appContext === 'gaming_app') {
+    appLayoutPolicy =
+      '- Games policy: target viewport-filling layout first. Use internal scroll regions only when needed for menus/lists.';
+  }
+
   return `
 ${currentInteractionSummary}
 ${currentAppContext}
 ${historyPromptSegment}
 ${retryHint ? `\n\nQuality Retry Hint:\n${retryHint}` : ''}
+
+Runtime Viewport Context (exact available content area this turn):
+- width: ${viewportWidth}px
+- height: ${viewportHeight}px
+- devicePixelRatio: ${viewportDpr}
+
+Layout Contract:
+- Root layout must be at least viewport height (e.g., min-height: ${viewportHeight}px or min-height: 100% with full-height chain).
+- Horizontal overflow should be avoided at this viewport width.
+- Vertical overflow is allowed when content needs it; do not render screens shorter than the viewport.
+${appLayoutPolicy}
 
 Full Context for Current Interaction (for your reference, primarily use summaries and history):
 ${JSON.stringify(currentInteraction, null, 1)}
@@ -210,6 +248,7 @@ export async function* streamAppContent(
   llmConfig: LLMConfig,
   sessionId: string,
   activeSkills: AppSkill[] = [],
+  viewportContext?: ViewportContext,
   retryHint?: string,
 ): AsyncGenerator<string, void, void> {
   if (!interactionHistory.length) {
@@ -232,7 +271,12 @@ export async function* streamAppContent(
     : '';
 
   const systemPrompt = `${baseSystemPrompt}${skillPromptSegment}`;
-  const userMessage = buildUserMessage(interactionHistory, styleConfig, retryHint);
+  const effectiveViewport = viewportContext || {
+    width: typeof window !== 'undefined' ? window.innerWidth : 1280,
+    height: typeof window !== 'undefined' ? window.innerHeight : 720,
+    devicePixelRatio: typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1,
+  };
+  const userMessage = buildUserMessage(interactionHistory, styleConfig, effectiveViewport, retryHint);
 
   const response = await fetch('/api/llm/stream', {
     method: 'POST',

@@ -26,6 +26,12 @@ export interface InteractionData {
   skillContextIds?: string[];
 }
 
+export interface ViewportContext {
+  width: number;
+  height: number;
+  devicePixelRatio: number;
+}
+
 export type UIDetailLevel = 'minimal' | 'standard' | 'rich';
 export type ColorTheme = 'system' | 'light' | 'dark' | 'colorful';
 export type SpeedMode = 'fast' | 'balanced' | 'quality';
