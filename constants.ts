@@ -9,7 +9,7 @@ import systemPromptText from './system_prompt.md?raw';
 export const DESKTOP_APP_DEFINITION: AppDefinition = {
   id: 'desktop_env',
   name: 'Gemini Desktop',
-  icon: 'GM',
+  icon: '🖥️',
   color: '#1a1a2e',
 };
 

@@ -4,7 +4,6 @@
  */
 /* tslint:disable */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { FeedbackPill } from './components/FeedbackPill';
 import { GeneratedContent } from './components/GeneratedContent';
 import { InsightsPanel } from './components/InsightsPanel';
 import { SettingsSkillPanel } from './components/SettingsSkillPanel';
@@ -132,12 +131,12 @@ function buildQualityFallbackHtml(appContext: string | null, reasonCodes: string
 
 function getHostBackground(colorTheme: StyleConfig['colorTheme']): string {
   if (colorTheme === 'dark') {
-    return 'radial-gradient(130% 85% at 50% 5%, #16253d 0%, #09101d 60%, #050910 100%)';
+    return 'linear-gradient(180deg, #1f2937 0%, #111827 100%)';
   }
   if (colorTheme === 'colorful') {
-    return 'radial-gradient(130% 90% at 50% 5%, #0f5ea7 0%, #1f3f8f 35%, #4b1f7a 70%, #0b1220 100%)';
+    return 'linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%)';
   }
-  return 'radial-gradient(140% 95% at 50% 0%, #dbeafe 0%, #c7d2fe 35%, #93c5fd 62%, #312e81 100%)';
+  return 'linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%)';
 }
 
 function isHostRenderedApp(appId?: string | null): boolean {
@@ -189,7 +188,6 @@ const App: React.FC = () => {
   const [settingsErrorMessage, setSettingsErrorMessage] = useState<string | null>(null);
   const [latestEpisodeId, setLatestEpisodeId] = useState<string | null>(null);
   const [latestGenerationId, setLatestGenerationId] = useState<string | null>(null);
-  const [feedbackExpanded, setFeedbackExpanded] = useState(false);
   const [feedbackRating, setFeedbackRating] = useState<EpisodeRating | null>(null);
   const [feedbackReasons, setFeedbackReasons] = useState<string[]>([]);
   const [feedbackFailureContext, setFeedbackFailureContext] = useState(false);
@@ -366,7 +364,6 @@ const App: React.FC = () => {
       setLatestGenerationId(null);
       setFeedbackRating(null);
       setFeedbackReasons([]);
-      setFeedbackExpanded(false);
       setFeedbackFailureContext(false);
       setCacheEligible(false);
 
@@ -443,11 +440,9 @@ const App: React.FC = () => {
         finalContent = buildQualityFallbackHtml(appContext, qualityResult.reasonCodes);
         setLlmContent(finalContent);
         setFeedbackFailureContext(true);
-        setFeedbackExpanded(true);
       } else if (requestFailed) {
         fallbackShown = true;
         setFeedbackFailureContext(true);
-        setFeedbackExpanded(true);
       }
 
       if (!signal.aborted) {
@@ -506,7 +501,7 @@ const App: React.FC = () => {
       const initialInteraction: InteractionData = {
         id: 'desktop_env',
         type: 'app_open',
-        elementText: 'Gemini Desktop',
+        elementText: DESKTOP_APP_DEFINITION.name,
         elementType: 'system',
         appContext: 'desktop_env',
         source: 'host',
@@ -569,7 +564,6 @@ const App: React.FC = () => {
       setLatestGenerationId(null);
       setFeedbackRating(null);
       setFeedbackReasons([]);
-      setFeedbackExpanded(false);
       setFeedbackFailureContext(false);
 
       if (app.id === SETTINGS_APP_DEFINITION.id) {
@@ -623,7 +617,6 @@ const App: React.FC = () => {
     setLatestGenerationId(null);
     setFeedbackRating(null);
     setFeedbackReasons([]);
-    setFeedbackExpanded(false);
     setFeedbackFailureContext(false);
     setCacheEligible(true);
 
@@ -848,7 +841,12 @@ const App: React.FC = () => {
       )?.icon
     : undefined;
 
-  const windowTitle = activeApp ? activeApp.name : 'Gemini Computer';
+  const windowTitle = activeApp ? activeApp.name : DESKTOP_APP_DEFINITION.name;
+  const feedbackAvailable =
+    !isLoading &&
+    !isHostRenderedApp(activeApp?.id) &&
+    Boolean(latestEpisodeId) &&
+    Boolean(llmContent);
 
   return (
     <div className="w-screen h-screen overflow-hidden" style={{ background: getHostBackground(styleConfig.colorTheme) }}>
@@ -862,6 +860,12 @@ const App: React.FC = () => {
         onOpenSettings={handleOpenSettings}
         onExitToDesktop={handleCloseAppView}
         onGlobalPrompt={handleGlobalPrompt}
+        feedbackAvailable={feedbackAvailable}
+        feedbackFailureContext={feedbackFailureContext}
+        feedbackRating={feedbackRating}
+        feedbackReasons={feedbackReasons}
+        onFeedbackRate={handleFeedbackRate}
+        onToggleFeedbackReason={handleToggleFeedbackReason}
       >
         <div ref={contentViewportRef} className="w-full h-full relative">
           {error && <div className="p-4 text-red-600 bg-red-100 rounded-md">{error}</div>}
@@ -893,21 +897,6 @@ const App: React.FC = () => {
               uiSessionId={activeUiSessionId}
             />
           )}
-          <FeedbackPill
-            visible={
-              !isLoading &&
-              !isHostRenderedApp(activeApp?.id) &&
-              Boolean(latestEpisodeId) &&
-              Boolean(llmContent)
-            }
-            expanded={feedbackExpanded}
-            isFailureContext={feedbackFailureContext}
-            selectedRating={feedbackRating}
-            selectedReasons={feedbackReasons}
-            onToggleExpanded={() => setFeedbackExpanded((value) => !value)}
-            onRate={handleFeedbackRate}
-            onToggleReason={handleToggleFeedbackReason}
-          />
         </div>
       </Window>
     </div>

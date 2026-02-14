@@ -524,7 +524,7 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
 
   // Status text
   const getStatusText = (): string => {
-    if (!htmlContent) return 'Connecting to Gemini...';
+    if (!htmlContent) return 'Connecting...';
     if (firstTagIndex === -1) return 'Thinking...';
     if (/<script/i.test(code) && !/<\/script>/i.test(code))
       return 'Building interactivity...';
@@ -624,7 +624,7 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
                   "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
               }}
             >
-              Connecting to Gemini...
+              Connecting...
             </div>
             <div
               style={{
