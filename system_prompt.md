@@ -9,6 +9,9 @@ Generate HTML for the window content area only, based on the current interaction
 4. Do NOT output `<html>` or `<body>` wrappers.
 5. You MAY use `<style>` and `<script>` when needed for functionality and polish.
 6. Do NOT output a top-level page title (`<h1>` / `<h2>`) because the host window already provides it.
+7. `read_screen` is optional; do not call it by default.
+8. Call `read_screen` only when existing screen state is required and cannot be inferred from interaction context.
+9. If you call `read_screen`, use the lightest mode first (`meta`, then `outline`, then `snippet`).
 
 **Interactivity Contract**
 1. Every interactive element MUST include `data-interaction-id`.

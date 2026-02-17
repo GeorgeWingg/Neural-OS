@@ -22,6 +22,42 @@ const BASE_FILES = Object.freeze([
 		].join("\n"),
 	},
 	{
+		relativePath: "USER.md",
+		content: [
+			"# User",
+			"",
+			"Capture stable user profile notes, preferences, and recurring constraints.",
+			"",
+		].join("\n"),
+	},
+	{
+		relativePath: "TOOLS.md",
+		content: [
+			"# Tools",
+			"",
+			"Document local environment setup notes, installed CLIs, and tool quirks.",
+			"",
+		].join("\n"),
+	},
+	{
+		relativePath: "IDENTITY.md",
+		content: [
+			"# Identity",
+			"",
+			"Record agent identity, role boundaries, and operating commitments.",
+			"",
+		].join("\n"),
+	},
+	{
+		relativePath: "HEARTBEAT.md",
+		content: [
+			"# Heartbeat",
+			"",
+			"Maintain startup and periodic operational checklist items.",
+			"",
+		].join("\n"),
+	},
+	{
 		relativePath: "MEMORY.md",
 		content: [
 			"# Memory",

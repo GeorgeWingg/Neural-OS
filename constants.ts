@@ -77,8 +77,11 @@ export const DEFAULT_SYSTEM_PROMPT = systemPromptText;
 
 export const MANDATORY_OUTPUT_RULES = `
 **CRITICAL TECHNICAL REQUIREMENTS:**
-- Publish user-visible UI through the \`emit_screen\` tool. Do not rely on plain text output for final rendering.
+- Publish user-visible UI through the \`emit_screen\` tool. This is the canonical output channel.
+- Do not rely on plain text output for final rendering.
 - The \`emit_screen.html\` field must contain raw HTML content only. No markdown fences, no \`<html>\` or \`<body>\` wrappers.
+- \`read_screen\` is optional and only for state introspection when current UI state cannot be inferred.
+- If you use \`read_screen\`, use the lightest mode first (\`meta\`, then \`outline\`, then \`snippet\`).
 - You CAN and SHOULD use \`<style>\` tags for app-specific CSS.
 - You CAN and SHOULD use \`<script>\` tags for interactive apps.
 - Do NOT generate a main heading/title solely for window labeling — the window frame provides that.

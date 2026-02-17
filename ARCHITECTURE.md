@@ -10,7 +10,7 @@ This repository uses `gemini-3-flash-preview` exclusively; any other model versi
   - routing first-run users into `onboarding_app`
 - The model owns onboarding UI and conversational flow through `emit_screen`.
 - Filesystem skills remain canonical. During incomplete onboarding, host prompt policy gives onboarding precedence and expects `onboarding_skill`.
-- Tool policy during required onboarding is allowlist-only: `emit_screen`, `onboarding_get_state`, `onboarding_set_workspace_root`, `save_provider_key`, `onboarding_set_model_preferences`, `memory_append`, `onboarding_complete`.
+- Tool policy during required onboarding is allowlist-only: `emit_screen`, `onboarding_get_state`, `onboarding_set_workspace_root`, `save_provider_key`, `onboarding_set_model_preferences`, `read`, `write`, `edit`, `onboarding_complete`.
 - `AppSkill` records are deprecated migration debt and must not drive runtime behavior selection.
 
 # Architecture

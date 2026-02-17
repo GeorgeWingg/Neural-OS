@@ -11,6 +11,13 @@ export const ONBOARDING_CHECKPOINTS = Object.freeze([
 	"completed",
 ]);
 
+export const ONBOARDING_REQUIRED_COMPLETION_CHECKPOINTS = Object.freeze([
+	"workspace_ready",
+	"provider_ready",
+	"model_ready",
+	"memory_seeded",
+]);
+
 function nowIso(now = new Date()) {
 	return (now instanceof Date ? now : new Date(now)).toISOString();
 }
@@ -51,8 +58,6 @@ function normalizeCheckpoints(input, completed, workspaceReady) {
 	if (workspaceReady) output.workspace_ready = true;
 	if (completed) {
 		output.workspace_ready = true;
-		output.provider_ready = true;
-		output.model_ready = true;
 		output.memory_seeded = true;
 		output.completed = true;
 	}
@@ -204,16 +209,26 @@ export async function setOnboardingProviderConfiguration(workspaceRoot, payload 
 	const state = await loadOnboardingState(workspaceRoot);
 	const providerId = typeof payload.providerId === "string" ? payload.providerId.trim() : "";
 	const modelId = typeof payload.modelId === "string" ? payload.modelId.trim() : "";
+	const providerConfigured =
+		payload.providerConfigured === undefined ? state.providerConfigured : Boolean(payload.providerConfigured);
+	const providerReady =
+		payload.providerReady === undefined
+			? payload.providerConfigured === undefined
+				? state.checkpoints.provider_ready
+				: Boolean(payload.providerConfigured)
+			: Boolean(payload.providerReady);
+	const modelReady =
+		payload.modelReady === undefined ? (modelId ? true : state.checkpoints.model_ready) : Boolean(payload.modelReady);
 	const next = {
 		...state,
-		providerConfigured: payload.providerConfigured === undefined ? state.providerConfigured : Boolean(payload.providerConfigured),
+		providerConfigured,
 		providerId: providerId || state.providerId,
 		modelId: modelId || state.modelId,
 		toolTier: normalizeToolTier(payload.toolTier || state.toolTier),
 		checkpoints: {
 			...state.checkpoints,
-			provider_ready: payload.providerConfigured === undefined ? state.checkpoints.provider_ready : Boolean(payload.providerConfigured),
-			model_ready: modelId ? true : state.checkpoints.model_ready,
+			provider_ready: providerReady,
+			model_ready: modelReady,
 		},
 	};
 	if (!next.completed && next.lifecycle === "pending") {
@@ -238,20 +253,19 @@ export async function setOnboardingWorkspaceRoot(currentWorkspaceRoot, nextWorks
 	return normalizeState(migrated, nextPaths.workspaceRoot);
 }
 
+export function listMissingRequiredCompletionCheckpoints(state) {
+	return ONBOARDING_REQUIRED_COMPLETION_CHECKPOINTS.filter((checkpoint) => !state?.checkpoints?.[checkpoint]);
+}
+
 function hasRequiredCompletionCheckpoints(state) {
-	return Boolean(
-		state?.checkpoints?.workspace_ready &&
-			state?.checkpoints?.provider_ready &&
-			state?.checkpoints?.model_ready &&
-			state?.checkpoints?.memory_seeded,
-	);
+	return listMissingRequiredCompletionCheckpoints(state).length === 0;
 }
 
 export async function completeOnboarding(workspaceRoot, options = {}) {
 	const now = options.now instanceof Date ? options.now : new Date();
 	const state = await loadOnboardingState(workspaceRoot);
 	if (!hasRequiredCompletionCheckpoints(state)) {
-		const missing = ONBOARDING_CHECKPOINTS.filter((checkpoint) => checkpoint !== "completed" && !state.checkpoints[checkpoint]);
+		const missing = listMissingRequiredCompletionCheckpoints(state);
 		const message = `Cannot complete onboarding. Missing checkpoints: ${missing.join(", ")}.`;
 		const failed = {
 			...state,

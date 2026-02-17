@@ -38,6 +38,15 @@ export type StreamClientEvent =
   | { type: 'chunk'; chunk: string }
   | { type: 'thought'; text: string }
   | {
+      type: 'render_output_partial';
+      toolName?: string;
+      toolCallId?: string;
+      html: string;
+      isFinal?: boolean;
+      appContext?: string;
+      revisionNote?: string;
+    }
+  | {
       type: 'render_output';
       toolName?: string;
       toolCallId?: string;
@@ -507,6 +516,20 @@ export async function* streamAppContent(
           toolName: typeof event.toolName === 'string' ? event.toolName : undefined,
           toolCallId: typeof event.toolCallId === 'string' ? event.toolCallId : undefined,
           revision,
+          html: event.html,
+          isFinal: Boolean(event.isFinal),
+          appContext: typeof event.appContext === 'string' ? event.appContext : undefined,
+          revisionNote: typeof event.revisionNote === 'string' ? event.revisionNote : undefined,
+        },
+        outputChunk: null,
+      };
+    }
+    if (event.type === 'render_output_partial' && typeof event.html === 'string') {
+      return {
+        clientEvent: {
+          type: 'render_output_partial',
+          toolName: typeof event.toolName === 'string' ? event.toolName : undefined,
+          toolCallId: typeof event.toolCallId === 'string' ? event.toolCallId : undefined,
           html: event.html,
           isFinal: Boolean(event.isFinal),
           appContext: typeof event.appContext === 'string' ? event.appContext : undefined,

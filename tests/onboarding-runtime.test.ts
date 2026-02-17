@@ -39,25 +39,29 @@ describe("onboarding runtime", () => {
 		expect(state.checkpoints.workspace_ready).toBe(true);
 	});
 
-	it("requires checkpoints before completion", async () => {
+	it("requires deterministic completion checkpoints before completion", async () => {
 		const workspaceRoot = await makeTempWorkspaceRoot();
 		await startOnboardingRun(workspaceRoot);
-		await setOnboardingProviderConfiguration(workspaceRoot, {
-			providerConfigured: true,
-			providerId: "google",
-			modelId: "gemini-3-flash-preview",
-			toolTier: "standard",
-		});
-		await setOnboardingCheckpoint(workspaceRoot, "provider_ready", true);
-		await setOnboardingCheckpoint(workspaceRoot, "model_ready", true);
 
 		await expect(completeOnboarding(workspaceRoot)).rejects.toThrow(/Missing checkpoints/);
 
 		await setOnboardingCheckpoint(workspaceRoot, "memory_seeded", true);
+		await expect(completeOnboarding(workspaceRoot)).rejects.toThrow(/Missing checkpoints/);
+
+		await setOnboardingProviderConfiguration(workspaceRoot, {
+			providerConfigured: true,
+			providerReady: true,
+			providerId: "google",
+			modelId: "gemini-3-flash-preview",
+			modelReady: true,
+			toolTier: "standard",
+		});
 		const completed = await completeOnboarding(workspaceRoot);
 		expect(completed.completed).toBe(true);
 		expect(completed.lifecycle).toBe("completed");
 		expect(completed.checkpoints.completed).toBe(true);
+		expect(completed.checkpoints.provider_ready).toBe(true);
+		expect(completed.checkpoints.model_ready).toBe(true);
 	});
 
 	it("migrates onboarding state when workspace root changes", async () => {
@@ -72,9 +76,15 @@ describe("onboarding runtime", () => {
 
 	it("reopen keeps completion history and switches lifecycle", async () => {
 		const workspaceRoot = await makeTempWorkspaceRoot();
-		await setOnboardingCheckpoint(workspaceRoot, "provider_ready", true);
-		await setOnboardingCheckpoint(workspaceRoot, "model_ready", true);
 		await setOnboardingCheckpoint(workspaceRoot, "memory_seeded", true);
+		await setOnboardingProviderConfiguration(workspaceRoot, {
+			providerConfigured: true,
+			providerReady: true,
+			providerId: "google",
+			modelId: "gemini-3-flash-preview",
+			modelReady: true,
+			toolTier: "standard",
+		});
 		await completeOnboarding(workspaceRoot);
 		const reopened = await reopenOnboarding(workspaceRoot);
 		expect(reopened.completed).toBe(true);

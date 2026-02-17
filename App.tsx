@@ -507,6 +507,8 @@ const App: React.FC = () => {
         let failed = false;
         let lastStreamFrameAt = 0;
         let lastStreamFrameLength = 0;
+        let lastPartialRenderFrameAt = 0;
+        let lastPartialRenderLength = 0;
         let renderOutputState = createRenderOutputClientState();
         lastRuntimeErrorMessage = null;
         try {
@@ -523,6 +525,30 @@ const App: React.FC = () => {
               },
               onStreamEvent: (event: StreamClientEvent) => {
                 if (signal.aborted) return;
+                if (event.type === 'render_output_partial') {
+                  if (!event.html) return;
+                  accumulated = event.html;
+                  setLlmContent(accumulated);
+                  const now = Date.now();
+                  const lengthDelta = Math.abs(accumulated.length - lastPartialRenderLength);
+                  if (
+                    lastPartialRenderFrameAt === 0 ||
+                    lengthDelta >= 220 ||
+                    now - lastPartialRenderFrameAt >= 420
+                  ) {
+                    lastPartialRenderFrameAt = now;
+                    lastPartialRenderLength = accumulated.length;
+                    appendTimelineFrame({
+                      type: 'stream',
+                      label: 'Partial render stream',
+                      detail: `${accumulated.length.toLocaleString()} chars`,
+                      htmlSnapshot: accumulated,
+                      toolName: event.toolName,
+                      toolCallId: event.toolCallId,
+                    });
+                  }
+                  return;
+                }
                 if (event.type === 'render_output') {
                   renderOutputState = applyRenderOutputEvent(renderOutputState, event);
                   accumulated = resolveCanonicalHtml(renderOutputState);
@@ -764,7 +790,7 @@ const App: React.FC = () => {
       };
       setDebugRecords((previous) => [debugRecord, ...previous].slice(0, MAX_DEBUG_RECORDS));
       try {
-        const nextOnboardingState = await getOnboardingState(sessionId, config.workspaceRoot);
+        const nextOnboardingState = await getOnboardingState(sessionId, config.workspaceRoot, llmConfig);
         setOnboardingState(nextOnboardingState);
         if (
           nextOnboardingState.workspaceRoot &&
@@ -791,7 +817,7 @@ const App: React.FC = () => {
     let cancelled = false;
     const bootstrap = async () => {
       try {
-        const state = await getOnboardingState(sessionId, styleConfig.workspaceRoot);
+        const state = await getOnboardingState(sessionId, styleConfig.workspaceRoot, llmConfig);
         if (cancelled) return;
         setOnboardingState(state);
         if (state.workspaceRoot && state.workspaceRoot !== styleConfig.workspaceRoot) {
@@ -833,7 +859,7 @@ const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [internalHandleLlmRequest, sessionId, styleConfig]);
+  }, [internalHandleLlmRequest, llmConfig, sessionId, styleConfig]);
 
   useEffect(() => {
     let cancelled = false;

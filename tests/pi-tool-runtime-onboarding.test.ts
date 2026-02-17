@@ -35,22 +35,25 @@ describe("pi tool runtime onboarding policy", () => {
 		const toolNames = tools.map((tool) => tool.name);
 		expect(toolNames).toEqual([
 			"emit_screen",
+			"read_screen",
 			"onboarding_get_state",
 			"onboarding_set_workspace_root",
 			"save_provider_key",
 			"onboarding_set_model_preferences",
-			"memory_append",
+			"read",
+			"write",
+			"edit",
 			"onboarding_complete",
 		]);
 	});
 
 	it("blocks generic tools while onboarding is required", async () => {
 		const root = await makeTempWorkspaceRoot();
-		const result = await executeToolCall(
-			{
-				name: "read",
-				arguments: { path: "README.md" },
-			},
+			const result = await executeToolCall(
+				{
+					name: "bash",
+					arguments: { command: "pwd" },
+				},
 			{
 				runtimeConfig: createRuntimeConfig(root),
 				workspaceRoot: root,
@@ -60,6 +63,32 @@ describe("pi tool runtime onboarding policy", () => {
 		);
 		expect(result.isError).toBe(true);
 		expect(String(result.text)).toContain("blocked during required onboarding");
+	});
+
+	it("marks memory seeded when onboarding writes to memory files", async () => {
+		const root = await makeTempWorkspaceRoot();
+		let called = false;
+		const result = await executeToolCall(
+			{
+				name: "write",
+				arguments: {
+					path: "MEMORY.md",
+					content: "Initial onboarding memory note.",
+				},
+			},
+			{
+				runtimeConfig: createRuntimeConfig(root),
+				workspaceRoot: root,
+				onboardingMode: true,
+				onboardingHandlers: {
+					onMemoryFileWritten: async ({ path: relativePath }) => {
+						called = relativePath === "MEMORY.md";
+					},
+				},
+			},
+		);
+		expect(result.isError).toBe(false);
+		expect(called).toBe(true);
 	});
 
 	it("delegates save_provider_key to onboarding handler", async () => {

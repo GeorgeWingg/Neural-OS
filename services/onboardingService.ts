@@ -1,4 +1,4 @@
-import { OnboardingState } from '../types';
+import { LLMConfig, OnboardingState } from '../types';
 
 const TAURI_DEFAULT_API_ORIGIN = 'http://127.0.0.1:8787';
 
@@ -41,10 +41,17 @@ async function parseErrorMessage(response: Response): Promise<string> {
   return `HTTP ${response.status}`;
 }
 
-export async function getOnboardingState(sessionId: string, workspaceRoot: string): Promise<OnboardingState> {
+export async function getOnboardingState(
+  sessionId: string,
+  workspaceRoot: string,
+  llmConfig?: Partial<LLMConfig>,
+): Promise<OnboardingState> {
   const query = new URLSearchParams();
   if (sessionId) query.set('sessionId', sessionId);
   if (workspaceRoot) query.set('workspaceRoot', workspaceRoot);
+  if (llmConfig?.providerId) query.set('providerId', llmConfig.providerId);
+  if (llmConfig?.modelId) query.set('modelId', llmConfig.modelId);
+  if (llmConfig?.toolTier) query.set('toolTier', llmConfig.toolTier);
   const response = await fetch(apiUrl(`/api/onboarding/state?${query.toString()}`));
   if (!response.ok) {
     throw new Error(`Failed to load onboarding state: ${await parseErrorMessage(response)}`);

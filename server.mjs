@@ -19,6 +19,7 @@ import {
 	executeToolCall,
 } from "./services/piToolRuntime.mjs";
 import { applyEmitScreen, createRenderOutputState, validateEmitScreenArgs } from "./services/renderOutputTool.mjs";
+import { createReadScreenUsageState, runReadScreenToolCall } from "./services/readScreenRuntime.mjs";
 import {
 	WorkspacePolicyError,
 	createWorkspacePolicy,
@@ -29,7 +30,9 @@ import { buildSkillsPromptMetadata, buildSkillsStatus } from "./services/skillsF
 import { appendMemoryNote, buildMemoryBootstrapContext } from "./services/memoryRuntime.mjs";
 import {
 	completeOnboarding,
+	listMissingRequiredCompletionCheckpoints,
 	loadOnboardingState,
+	ONBOARDING_REQUIRED_COMPLETION_CHECKPOINTS,
 	reopenOnboarding,
 	setOnboardingCheckpoint,
 	setOnboardingProviderConfiguration,
@@ -95,6 +98,8 @@ const EMIT_SCREEN_MAX_CALLS = parseNumberEnv(
 	24,
 	{ min: 1, max: 256 },
 );
+const EMIT_SCREEN_PARTIAL_MIN_CHAR_DELTA = 64;
+const EMIT_SCREEN_PARTIAL_MIN_INTERVAL_MS = 120;
 const DEFAULT_WORKSPACE_ROOT = "./workspace";
 const WORKSPACE_POLICY_ROOTS = parsePathListEnv(
 	"NEURAL_COMPUTER_WORKSPACE_POLICY_ROOTS",
@@ -521,11 +526,58 @@ async function resolveAndEnsureWorkspaceRoot(requestedWorkspaceRoot) {
 	return workspaceRoot;
 }
 
+function extractRequestedLlmConfig(source) {
+	const record = source && typeof source === "object" ? source : {};
+	const providerId = typeof record.providerId === "string" ? record.providerId.trim() : "";
+	const modelId = typeof record.modelId === "string" ? record.modelId.trim() : "";
+	const toolTier = typeof record.toolTier === "string" ? record.toolTier.trim() : "";
+	const config = {};
+	if (providerId) config.providerId = providerId;
+	if (modelId) config.modelId = modelId;
+	if (toolTier) config.toolTier = toolTier;
+	return config;
+}
+
+function resolveOnboardingLlmConfig(requestedLlmConfig = {}, state = undefined) {
+	const stateFallback = {
+		providerId: typeof state?.providerId === "string" && state.providerId.trim() ? state.providerId.trim() : DEFAULT_PROVIDER,
+		modelId: typeof state?.modelId === "string" && state.modelId.trim() ? state.modelId.trim() : DEFAULT_MODEL,
+		toolTier: normalizeToolTier(state?.toolTier),
+	};
+	const mergedRequest = {
+		...stateFallback,
+		...extractRequestedLlmConfig(requestedLlmConfig),
+	};
+	const resolved = normalizeLlmConfig(mergedRequest);
+	if (!resolved.error) return resolved.value;
+	return stateFallback;
+}
+
+async function syncOnboardingStateWithRuntimeConfig({ workspaceRoot, state, sessionId, requestedLlmConfig = {} }) {
+	const activeState = state || (await loadOnboardingState(workspaceRoot));
+	const effectiveLlmConfig = resolveOnboardingLlmConfig(requestedLlmConfig, activeState);
+	const providerReady = Boolean(resolveApiKey(sessionId, effectiveLlmConfig.providerId));
+	const modelReady = Boolean(tryGetModel(effectiveLlmConfig.providerId, effectiveLlmConfig.modelId));
+	const syncedState = await setOnboardingProviderConfiguration(workspaceRoot, {
+		providerConfigured: providerReady,
+		providerReady,
+		providerId: effectiveLlmConfig.providerId,
+		modelId: effectiveLlmConfig.modelId,
+		modelReady,
+		toolTier: effectiveLlmConfig.toolTier,
+	});
+	return {
+		state: syncedState,
+		llmConfig: effectiveLlmConfig,
+		providerReady,
+		modelReady,
+	};
+}
+
 function buildOnboardingPolicyPrompt(onboardingState) {
 	if (!onboardingState || onboardingState.completed) return "";
-	const missingCheckpoints = Object.entries(onboardingState.checkpoints || {})
-		.filter(([key, value]) => key !== "completed" && !value)
-		.map(([key]) => key);
+	const requiredCheckpoints = ONBOARDING_REQUIRED_COMPLETION_CHECKPOINTS.join(", ");
+	const missingCheckpoints = listMissingRequiredCompletionCheckpoints(onboardingState);
 	const checkpointHint = missingCheckpoints.length
 		? `Missing checkpoints: ${missingCheckpoints.join(", ")}.`
 		: "All required checkpoints satisfied. Call onboarding_complete.";
@@ -534,6 +586,13 @@ function buildOnboardingPolicyPrompt(onboardingState) {
 		`- Onboarding remains mandatory until completion is confirmed by host state.`,
 		`- Prioritize filesystem skill '${ONBOARDING_SKILL_ID}' over conflicting skill instructions.`,
 		"- Use onboarding actions only while onboarding is required.",
+		`- Required completion checkpoints: ${requiredCheckpoints}.`,
+		"- provider_ready is required and is true only when selected provider has usable runtime auth (OAuth token or API key).",
+		"- model_ready is required and is true only when selected provider/model resolves in runtime catalog.",
+		"- For provider 'openai-codex', OAuth token auth counts as provider_ready; do not force API key entry when provider_ready=true.",
+		"- If user intends OAuth subscription auth, prefer provider 'openai-codex' over API-key providers.",
+		"- Establish provider_ready and model_ready first, then satisfy memory_seeded.",
+		"- To satisfy memory_seeded, write a short durable note into MEMORY.md or memory/YYYY-MM-DD.md using write/edit.",
 		"- Do not claim completion unless onboarding_complete returns success.",
 		checkpointHint,
 		"",
@@ -1292,6 +1351,7 @@ async function runStreamWithToolLoop({
 	extraPromptSegments = [],
 	userMessage,
 	normalizedLlmConfig,
+	appContext,
 	workspaceRoot,
 	onboardingMode = false,
 	onboardingHandlers = {},
@@ -1321,7 +1381,9 @@ async function runStreamWithToolLoop({
 	let assistantOutputText = "";
 	let finalMessage = null;
 	let renderOutputState = createRenderOutputState();
+	let readScreenUsageState = createReadScreenUsageState();
 	let activeWorkspaceRoot = workspaceRoot;
+	const emitScreenPartialByToolCall = new Map();
 	const buildLoopResult = () => ({
 		finalMessage,
 		assistantOutputText,
@@ -1348,22 +1410,75 @@ async function runStreamWithToolLoop({
 				writeChunk(res, { type: "chunk", chunk: event.delta });
 			} else if (event.type === "thinking_delta") {
 				writeChunk(res, { type: "thought", text: event.delta });
-			} else if (event.type === "toolcall_start") {
-				const startedToolName =
-					(typeof event?.toolCall?.name === "string" && event.toolCall.name.trim()) ||
-					(typeof event?.name === "string" && event.name.trim()) ||
-					"tool";
+				} else if (event.type === "toolcall_start") {
+					const startedToolName =
+						(typeof event?.toolCall?.name === "string" && event.toolCall.name.trim()) ||
+						(typeof event?.name === "string" && event.name.trim()) ||
+						"tool";
 				const startedToolCallId =
 					(typeof event?.toolCall?.id === "string" && event.toolCall.id) ||
 					(typeof event?.id === "string" ? event.id : undefined);
-				writeChunk(res, {
-					type: "tool_call_start",
-					toolName: startedToolName,
-					toolCallId: startedToolCallId,
-				});
-				writeChunk(res, { type: "thought", text: `[System] Resolving tool call (${startedToolName})...` });
+					writeChunk(res, {
+						type: "tool_call_start",
+						toolName: startedToolName,
+						toolCallId: startedToolCallId,
+					});
+					writeChunk(res, { type: "thought", text: `[System] Resolving tool call (${startedToolName})...` });
+				} else if (event.type === "toolcall_delta") {
+					const contentIndex = Number.isFinite(event?.contentIndex) ? Number(event.contentIndex) : -1;
+					const partialContent =
+						Array.isArray(event?.partial?.content) && contentIndex >= 0
+							? event.partial.content[contentIndex]
+							: undefined;
+					if (partialContent?.type !== "toolCall" || partialContent?.name !== "emit_screen") {
+						continue;
+					}
+					const partialArgs =
+						partialContent.arguments && typeof partialContent.arguments === "object"
+							? partialContent.arguments
+							: {};
+					const partialHtml = typeof partialArgs.html === "string" ? partialArgs.html : "";
+					if (!partialHtml) {
+						continue;
+					}
+					const normalizedToolCallId =
+						typeof partialContent.id === "string" && partialContent.id.trim()
+							? partialContent.id.trim()
+							: `emit_screen_partial_${contentIndex}`;
+					const previousPartial = emitScreenPartialByToolCall.get(normalizedToolCallId);
+					const now = Date.now();
+					const hasChanged = !previousPartial || previousPartial.html !== partialHtml;
+					const lengthDelta = previousPartial ? Math.abs(partialHtml.length - previousPartial.html.length) : partialHtml.length;
+					const dueByLength = lengthDelta >= EMIT_SCREEN_PARTIAL_MIN_CHAR_DELTA;
+					const dueByTime =
+						!previousPartial || now - previousPartial.emittedAt >= EMIT_SCREEN_PARTIAL_MIN_INTERVAL_MS;
+					if (!hasChanged || (!dueByLength && !dueByTime)) {
+						continue;
+					}
+					emitScreenPartialByToolCall.set(normalizedToolCallId, {
+						html: partialHtml,
+						emittedAt: now,
+					});
+					writeChunk(res, {
+						type: "render_output_partial",
+						toolName: "emit_screen",
+						toolCallId:
+							typeof partialContent.id === "string" && partialContent.id.trim()
+								? partialContent.id.trim()
+								: undefined,
+						html: partialHtml.slice(0, EMIT_SCREEN_MAX_HTML_CHARS),
+						appContext:
+							typeof partialArgs.appContext === "string" && partialArgs.appContext.trim()
+								? partialArgs.appContext.trim()
+								: undefined,
+						revisionNote:
+							typeof partialArgs.revisionNote === "string" && partialArgs.revisionNote.trim()
+								? partialArgs.revisionNote.trim().slice(0, 200)
+								: undefined,
+						isFinal: Boolean(partialArgs.isFinal),
+					});
+				}
 			}
-		}
 
 		finalMessage = await stream.result();
 		context.messages.push(finalMessage);
@@ -1382,10 +1497,13 @@ async function runStreamWithToolLoop({
 			return buildLoopResult();
 		}
 
-		for (const toolCall of toolCalls) {
-			let toolText = "";
-			let isError = false;
-			if (toolCall.name === "emit_screen") {
+			for (const toolCall of toolCalls) {
+				let toolText = "";
+				let isError = false;
+				if (typeof toolCall.id === "string" && toolCall.id.trim()) {
+					emitScreenPartialByToolCall.delete(toolCall.id.trim());
+				}
+					if (toolCall.name === "emit_screen") {
 				if (renderOutputState.renderCount >= EMIT_SCREEN_MAX_CALLS) {
 					isError = true;
 					toolText = `emit_screen call budget exceeded (${EMIT_SCREEN_MAX_CALLS} calls).`;
@@ -1405,11 +1523,21 @@ async function runStreamWithToolLoop({
 						assistantOutputText = renderOutputState.latestHtml;
 						writeChunk(res, applied.streamEvent);
 						toolText = applied.toolResultText;
+						}
 					}
-				}
-			} else if (normalizedLlmConfig.toolTier === "none" && !onboardingMode) {
-				isError = true;
-				toolText = "Tool access disabled by tool tier policy.";
+				} else if (toolCall.name === "read_screen") {
+					const readResult = runReadScreenToolCall({
+						args: toolCall.arguments,
+						renderOutputState,
+						usageState: readScreenUsageState,
+						appContext,
+					});
+					readScreenUsageState = readResult.nextState;
+					isError = Boolean(readResult.isError);
+					toolText = String(readResult.text || "");
+				} else if (normalizedLlmConfig.toolTier === "none" && !onboardingMode) {
+					isError = true;
+					toolText = "Tool access disabled by tool tier policy.";
 			} else {
 				const toolResult = await executeToolCall(toolCall, {
 					runtimeConfig: workspaceToolRuntime,
@@ -1725,9 +1853,21 @@ app.get("/api/onboarding/state", async (req, res) => {
 		typeof req.query.workspaceRoot === "string" && req.query.workspaceRoot.trim()
 			? req.query.workspaceRoot.trim()
 			: DEFAULT_WORKSPACE_ROOT;
+	const sessionId = typeof req.query.sessionId === "string" && req.query.sessionId.trim() ? req.query.sessionId.trim() : "";
+	const requestedLlmConfig = extractRequestedLlmConfig(req.query);
 	try {
 		const workspaceRoot = await resolveAndEnsureWorkspaceRoot(requestedWorkspaceRoot);
-		const onboardingState = await startOnboardingRun(workspaceRoot);
+		let onboardingState = await startOnboardingRun(workspaceRoot);
+		if (!onboardingState.completed) {
+			onboardingState = (
+				await syncOnboardingStateWithRuntimeConfig({
+					workspaceRoot,
+					state: onboardingState,
+					sessionId,
+					requestedLlmConfig,
+				})
+			).state;
+		}
 		res.json({
 			ok: true,
 			workspaceRoot,
@@ -1893,8 +2033,18 @@ app.post("/api/llm/stream", async (req, res) => {
 	});
 
 	const normalizedMode = normalizeContextMemoryMode(contextMemoryMode);
-	let onboardingState = await startOnboardingRun(validatedWorkspaceRoot);
-	const onboardingMode = !onboardingState.completed;
+		let onboardingState = await startOnboardingRun(validatedWorkspaceRoot);
+		if (!onboardingState.completed) {
+			onboardingState = (
+				await syncOnboardingStateWithRuntimeConfig({
+					workspaceRoot: validatedWorkspaceRoot,
+					state: onboardingState,
+					sessionId,
+					requestedLlmConfig: normalizedLlmConfig,
+				})
+			).state;
+		}
+		const onboardingMode = !onboardingState.completed;
 	let normalizedAppContext = normalizeAppContext(appContext || currentInteraction?.appContext);
 	if (onboardingMode && normalizedAppContext !== ONBOARDING_APP_CONTEXT) {
 		normalizedAppContext = ONBOARDING_APP_CONTEXT;
@@ -1912,13 +2062,34 @@ app.post("/api/llm/stream", async (req, res) => {
 
 	const onboardingHandlers = {
 		getState: async ({ workspaceRoot: currentWorkspaceRoot }) => {
-			onboardingState = await loadOnboardingState(currentWorkspaceRoot || onboardingState.workspaceRoot);
+			const resolvedRoot = currentWorkspaceRoot || onboardingState.workspaceRoot;
+			onboardingState = await loadOnboardingState(resolvedRoot);
+			if (!onboardingState.completed) {
+				onboardingState = (
+					await syncOnboardingStateWithRuntimeConfig({
+						workspaceRoot: resolvedRoot,
+						state: onboardingState,
+						sessionId,
+						requestedLlmConfig: normalizedLlmConfig,
+					})
+				).state;
+			}
 			return onboardingState;
 		},
 		setWorkspaceRoot: async ({ workspaceRoot: nextWorkspaceRoot, currentWorkspaceRoot }) => {
 			const resolvedRoot = await resolveAndEnsureWorkspaceRoot(nextWorkspaceRoot);
 			onboardingState = await setOnboardingWorkspaceRoot(currentWorkspaceRoot, resolvedRoot);
 			onboardingState = await setOnboardingCheckpoint(resolvedRoot, "workspace_ready", true);
+			if (!onboardingState.completed) {
+				onboardingState = (
+					await syncOnboardingStateWithRuntimeConfig({
+						workspaceRoot: resolvedRoot,
+						state: onboardingState,
+						sessionId,
+						requestedLlmConfig: normalizedLlmConfig,
+					})
+				).state;
+			}
 			await appendOnboardingEvent(resolvedRoot, {
 				event: "workspace_root_updated",
 				runId: onboardingState.runId,
@@ -1942,17 +2113,26 @@ app.post("/api/llm/stream", async (req, res) => {
 			}
 			const store = getSessionStore(sessionId);
 			store[normalizedProvider] = String(apiKey).trim();
-			onboardingState = await setOnboardingProviderConfiguration(currentWorkspaceRoot, {
-				providerConfigured: true,
-				providerId: normalizedProvider,
+			const synchronized = await syncOnboardingStateWithRuntimeConfig({
+				workspaceRoot: currentWorkspaceRoot,
+				state: onboardingState,
+				sessionId,
+				requestedLlmConfig: {
+					providerId: normalizedProvider,
+					modelId: onboardingState.modelId,
+					toolTier: onboardingState.toolTier,
+				},
 			});
-			onboardingState = await setOnboardingCheckpoint(currentWorkspaceRoot, "provider_ready", true);
+			onboardingState = synchronized.state;
 			await appendOnboardingEvent(currentWorkspaceRoot, {
 				event: "provider_key_saved",
 				runId: onboardingState.runId,
 				lifecycle: onboardingState.lifecycle,
 				checkpoint: "provider_ready",
-				details: { providerId: normalizedProvider },
+				details: {
+					providerId: normalizedProvider,
+					providerReady: synchronized.providerReady,
+				},
 			});
 			return { providerId: normalizedProvider, state: onboardingState };
 		},
@@ -1965,39 +2145,43 @@ app.post("/api/llm/stream", async (req, res) => {
 			if (resolved.error) {
 				throw new Error(resolved.error.message || "Invalid model preferences.");
 			}
-			onboardingState = await setOnboardingProviderConfiguration(currentWorkspaceRoot, {
-				providerConfigured: onboardingState.providerConfigured,
-				providerId: resolved.value.providerId,
-				modelId: resolved.value.modelId,
-				toolTier: resolved.value.toolTier,
+			const synchronized = await syncOnboardingStateWithRuntimeConfig({
+				workspaceRoot: currentWorkspaceRoot,
+				state: onboardingState,
+				sessionId,
+				requestedLlmConfig: resolved.value,
 			});
-			onboardingState = await setOnboardingCheckpoint(currentWorkspaceRoot, "model_ready", true);
+			onboardingState = synchronized.state;
 			await appendOnboardingEvent(currentWorkspaceRoot, {
 				event: "model_preferences_saved",
 				runId: onboardingState.runId,
 				lifecycle: onboardingState.lifecycle,
 				checkpoint: "model_ready",
-				details: resolved.value,
+				details: {
+					...resolved.value,
+					providerReady: synchronized.providerReady,
+					modelReady: synchronized.modelReady,
+				},
 			});
 			return { llmConfig: resolved.value, state: onboardingState };
 		},
-		onMemoryAppend: async ({ workspaceRoot: currentWorkspaceRoot, note, tags }) => {
-			const mergedTags = [...new Set([...tags, "onboarding", "checkpoint", onboardingState.providerId || ""])].filter(Boolean);
-			const result = await appendMemoryNote({
-				workspaceRoot: currentWorkspaceRoot,
-				note,
-				tags: mergedTags,
-			});
-			onboardingState = await setOnboardingCheckpoint(currentWorkspaceRoot, "memory_seeded", true);
-			await appendOnboardingEvent(currentWorkspaceRoot, {
-				event: "memory_seeded",
-				runId: onboardingState.runId,
-				lifecycle: onboardingState.lifecycle,
-				checkpoint: "memory_seeded",
-				details: { path: result.path, tags: mergedTags },
-			});
-			return result;
-		},
+			onMemoryFileWritten: async ({ workspaceRoot: currentWorkspaceRoot, path: relativePath, mode }) => {
+				if (onboardingState?.checkpoints?.memory_seeded) {
+					return { checkpointUpdated: false };
+				}
+				onboardingState = await setOnboardingCheckpoint(currentWorkspaceRoot, "memory_seeded", true);
+				await appendOnboardingEvent(currentWorkspaceRoot, {
+					event: "memory_seeded",
+					runId: onboardingState.runId,
+					lifecycle: onboardingState.lifecycle,
+					checkpoint: "memory_seeded",
+					details: {
+						path: relativePath || "",
+						mode: mode || "",
+					},
+				});
+				return { checkpointUpdated: true };
+			},
 		complete: async ({ workspaceRoot: currentWorkspaceRoot, summary }) => {
 			if (summary) {
 				await appendMemoryNote({
@@ -2069,6 +2253,7 @@ app.post("/api/llm/stream", async (req, res) => {
 					extraPromptSegments: runtimePromptSegments,
 					userMessage: resolvedUserMessage,
 					normalizedLlmConfig,
+					appContext: normalizedAppContext,
 					workspaceRoot: validatedWorkspaceRoot,
 					onboardingMode,
 					onboardingHandlers,

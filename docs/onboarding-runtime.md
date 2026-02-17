@@ -35,7 +35,21 @@ Checkpoints:
 - `memory_seeded`
 - `completed`
 
-`onboarding_complete` is allowed only when all required non-completed checkpoints are true.
+Required completion checkpoints:
+
+- `workspace_ready`
+- `provider_ready`
+- `model_ready`
+- `memory_seeded`
+
+`provider_ready` is deterministic and derived from runtime-auth availability for the selected provider:
+
+- valid OAuth token (for OAuth-backed providers such as `openai-codex`), or
+- valid provider API key (session/env).
+
+`model_ready` is deterministic and derived from whether selected `providerId/modelId` resolves in the runtime catalog.
+
+`onboarding_complete` is allowed only when all required completion checkpoints are true.
 
 ## API
 
@@ -52,18 +66,20 @@ Allowed tools/actions:
 - `onboarding_set_workspace_root`
 - `save_provider_key`
 - `onboarding_set_model_preferences`
-- `memory_append`
+- `read`
+- `write`
+- `edit`
 - `onboarding_complete`
 
 Blocked during required onboarding:
 
-- `read`, `write`, `edit`, `grep`, `find`, `ls`, `bash`, `memory_get`, `memory_search`, `google_search`
+- `grep`, `find`, `ls`, `bash`, `memory_get`, `memory_search`, `google_search`
 
 ## Safety
 
 - Provider keys are accepted only via `save_provider_key` and persisted in server session credentials.
 - Secret-like payloads are blocked in generic write/edit/bash flows.
-- Direct memory file writes are blocked during required onboarding; onboarding memory persistence uses `memory_append`.
+- Onboarding memory seeding happens when the model writes `MEMORY.md` or `memory/*.md` via `write`/`edit`.
 
 ## Observability
 

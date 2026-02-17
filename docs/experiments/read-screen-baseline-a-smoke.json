@@ -1,0 +1,83 @@
+{
+  "label": "baseline-a-smoke",
+  "createdAt": "2026-02-17T13:32:52.565Z",
+  "config": {
+    "apiOrigin": "http://127.0.0.1:8787",
+    "runs": 1,
+    "sessionId": "read_screen_benchmark_session",
+    "providerId": "google",
+    "modelId": "gemini-3-flash-preview",
+    "toolTier": "standard",
+    "workspaceRoot": "./workspace"
+  },
+  "fixtures": [
+    {
+      "id": "ns_desktop_focus",
+      "category": "non_stateful",
+      "appContext": "desktop_env",
+      "text": "Render a clean desktop with launch tiles and one status widget for current date/time."
+    },
+    {
+      "id": "ns_calendar_compact",
+      "category": "non_stateful",
+      "appContext": "calendar_app",
+      "text": "Render a compact monthly calendar with previous/next month controls and an events sidebar."
+    },
+    {
+      "id": "ss_preserve_filter_state",
+      "category": "state_sensitive",
+      "appContext": "documents",
+      "text": "Assume a file list is already visible with filters active. Update only the sort mode to Name (A-Z) while preserving current filters and existing data-interaction-id values."
+    },
+    {
+      "id": "ss_partial_update_only",
+      "category": "state_sensitive",
+      "appContext": "web_browser_app",
+      "text": "Assume a browser page is already rendered. Update only the tab strip to add a new tab and keep existing page content unchanged."
+    }
+  ],
+  "results": [
+    {
+      "prompt_id": "ns_desktop_focus",
+      "category": "non_stateful",
+      "runtime_error": false,
+      "runtime_error_message": null,
+      "missing_emit_screen_error": false,
+      "did_render_output": true,
+      "tool_calls_per_turn": 1,
+      "read_screen_calls_per_turn": 0,
+      "time_to_first_render_output_ms": 11639,
+      "time_to_done_ms": 15762
+    }
+  ],
+  "summary": {
+    "runs": 1,
+    "p50_time_to_done_ms": 15762,
+    "p95_time_to_done_ms": 15762,
+    "mean_time_to_done_ms": 15762,
+    "p50_time_to_first_render_output_ms": 11639,
+    "p95_time_to_first_render_output_ms": 11639,
+    "mean_time_to_first_render_output_ms": 11639,
+    "p50_tool_calls_per_turn": 1,
+    "p50_read_screen_calls_per_turn": 0,
+    "runtime_error_rate": 0,
+    "missing_emit_screen_error_rate": 0,
+    "render_output_rate": 1
+  },
+  "byCategory": {
+    "non_stateful": {
+      "runs": 1,
+      "p50_time_to_done_ms": 15762,
+      "p95_time_to_done_ms": 15762,
+      "mean_time_to_done_ms": 15762,
+      "p50_time_to_first_render_output_ms": 11639,
+      "p95_time_to_first_render_output_ms": 11639,
+      "mean_time_to_first_render_output_ms": 11639,
+      "p50_tool_calls_per_turn": 1,
+      "p50_read_screen_calls_per_turn": 0,
+      "runtime_error_rate": 0,
+      "missing_emit_screen_error_rate": 0,
+      "render_output_rate": 1
+    }
+  }
+}

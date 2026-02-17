@@ -3,7 +3,15 @@ import path from "node:path";
 
 const MAX_SEARCH_FILE_CHARS = 120_000;
 const DEFAULT_MEMORY_SEARCH_LIMIT = 5;
-const CORE_MEMORY_FILES = Object.freeze(["SOUL.md", "MEMORY.md"]);
+const CORE_MEMORY_FILES = Object.freeze([
+	"AGENTS.md",
+	"SOUL.md",
+	"USER.md",
+	"TOOLS.md",
+	"IDENTITY.md",
+	"HEARTBEAT.md",
+	"MEMORY.md",
+]);
 
 function normalizeText(value) {
 	if (typeof value === "string") return value;
@@ -123,7 +131,7 @@ export async function readMemoryFile({ workspaceRoot, relativePath, offset = 0, 
 export async function appendMemoryNote({ workspaceRoot, note, tags = [], now = new Date() }) {
 	const normalizedNote = normalizeText(note).trim();
 	if (!normalizedNote) {
-		throw new Error("memory_append requires non-empty note text.");
+		throw new Error("appendMemoryNote requires non-empty note text.");
 	}
 	const canonicalWorkspaceRoot = path.resolve(workspaceRoot);
 	const memoryDir = path.join(canonicalWorkspaceRoot, "memory");
@@ -202,11 +210,13 @@ export async function buildMemoryBootstrapContext({
 		}
 	};
 
-	await safeRead("SOUL.md", "Soul Guidance", 1_200);
-	await safeRead("MEMORY.md", "Durable Memory", 1_500);
-
-	const todayRelativePath = `memory/${dateKey(new Date())}.md`;
-	await safeRead(todayRelativePath, "Today Memory", 1_500);
+	await safeRead("AGENTS.md", "Agent Instructions", 1_200);
+	await safeRead("SOUL.md", "Soul Guidance", 900);
+	await safeRead("USER.md", "User Profile", 900);
+	await safeRead("TOOLS.md", "Tool Notes", 700);
+	await safeRead("IDENTITY.md", "Identity", 700);
+	await safeRead("HEARTBEAT.md", "Heartbeat", 700);
+	await safeRead("MEMORY.md", "Durable Memory", 1_700);
 
 	if (!chunks.length) return "";
 	const header = [
