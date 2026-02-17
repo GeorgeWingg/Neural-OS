@@ -13,8 +13,20 @@ const MIN_ACTIONABLE_SAMPLE = 20;
 const PROMOTION_PASS_STREAK = 2;
 const DEMOTION_FAILURE_STREAK = 2;
 const DISABLE_FAILURE_STREAK = 3;
-const SKILL_TRANSITION_STORAGE_KEY = 'gemini-os-skill-transitions-v1';
+const SKILL_TRANSITION_STORAGE_KEY = 'neural-computer-skill-transitions-v1';
+const LEGACY_SKILL_TRANSITION_STORAGE_KEY = 'gemini-os-skill-transitions-v1';
 const MAX_TRANSITIONS = 240;
+
+function readTransitionStorageRaw(): string | null {
+  const current = localStorage.getItem(SKILL_TRANSITION_STORAGE_KEY);
+  if (current) return current;
+  const legacy = localStorage.getItem(LEGACY_SKILL_TRANSITION_STORAGE_KEY);
+  if (legacy) {
+    localStorage.setItem(SKILL_TRANSITION_STORAGE_KEY, legacy);
+    localStorage.removeItem(LEGACY_SKILL_TRANSITION_STORAGE_KEY);
+  }
+  return legacy;
+}
 
 export interface SkillEvaluationSnapshot {
   skillId: string;
@@ -44,7 +56,7 @@ export interface SelfImprovementCycleReport {
 
 export function listSkillTransitionEvents(limit?: number): SkillStatusTransition[] {
   try {
-    const raw = localStorage.getItem(SKILL_TRANSITION_STORAGE_KEY);
+    const raw = readTransitionStorageRaw();
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
     const ordered = (parsed as SkillStatusTransition[]).sort(

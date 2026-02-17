@@ -32,21 +32,101 @@ export interface ViewportContext {
   devicePixelRatio: number;
 }
 
-export type UIDetailLevel = 'minimal' | 'standard' | 'rich';
+export type GenerationTimelineEventType =
+  | 'start'
+  | 'stream'
+  | 'render_output'
+  | 'thought'
+  | 'tool_call_start'
+  | 'tool_call_result'
+  | 'retry'
+  | 'done'
+  | 'error';
+
+export interface GenerationTimelineFrame {
+  id: string;
+  type: GenerationTimelineEventType;
+  createdAt: number;
+  label: string;
+  detail?: string;
+  htmlSnapshot: string;
+  toolName?: string;
+  toolCallId?: string;
+  isError?: boolean;
+}
+
 export type ColorTheme = 'system' | 'light' | 'dark' | 'colorful';
-export type SpeedMode = 'fast' | 'balanced' | 'quality';
+export type LoadingUiMode = 'immersive' | 'code';
+export type ContextMemoryMode = 'legacy' | 'compacted';
 export type ToolTier = 'none' | 'standard' | 'experimental';
 export type EpisodeRating = 'good' | 'okay' | 'bad';
 
+export interface ContextUsageSnapshot {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  totalTokens?: number;
+}
+
+export interface TurnStateSummary {
+  goal: string;
+  ui_state: string;
+  actions_taken: string[];
+  open_issues: string[];
+  next_steps: string[];
+}
+
+export interface ContextTurn {
+  turnId: string;
+  timestamp: number;
+  appContext: string;
+  interaction: InteractionData;
+  userPrompt: string;
+  assistantStateSummary: TurnStateSummary;
+  usage?: ContextUsageSnapshot;
+  estimatedTokens: number;
+}
+
+export interface ContextLane {
+  summary: string;
+  recentTurns: ContextTurn[];
+  lastEstimate?: {
+    tokens: number;
+    contextWindow: number;
+    threshold: number;
+    estimatedAt: number;
+  };
+  compactionInFlight: boolean;
+  compactionQueued: boolean;
+}
+
+export interface ContextMemoryDebugSnapshot {
+  laneKey: string;
+  fillPercent: number;
+  tokens: number;
+  contextWindow: number;
+  threshold: number;
+  recentTurnCount: number;
+  summaryLength: number;
+  compactionInFlight: boolean;
+  compactionQueued: boolean;
+  updatedAt: number;
+}
+
+export interface ContextCompactionSettings {
+  reserveTokens: number;
+  keepRecentTokens: number;
+}
+
 export interface StyleConfig {
-  detailLevel: UIDetailLevel;
   colorTheme: ColorTheme;
-  speedMode: SpeedMode;
+  loadingUiMode: LoadingUiMode;
+  contextMemoryMode: ContextMemoryMode;
   enableAnimations: boolean;
-  maxHistoryLength: number;
-  isStatefulnessEnabled: boolean;
   qualityAutoRetryEnabled: boolean;
   customSystemPrompt: string;
+  workspaceRoot: string;
   bingApiKey?: string;
   googleSearchApiKey?: string;
   googleSearchCx?: string;
@@ -60,6 +140,9 @@ export interface LLMConfig {
 
 export type SkillScope = 'global' | 'app' | 'intent';
 
+/**
+ * @deprecated Legacy prompt-policy record. Runtime behavior is now driven by filesystem SKILL.md packages.
+ */
 export interface AppSkill {
   id: string;
   scope: SkillScope;
@@ -84,6 +167,44 @@ export interface AppSkill {
   lastStatusChangeAt?: number;
   lastPromotionAt?: number;
   lastDemotionAt?: number;
+}
+
+export interface DebugSkillSnapshot {
+  id: string;
+  title: string;
+  scope: SkillScope;
+  status: AppSkill['status'];
+  score: number;
+  confidence: number;
+  appContext?: string;
+}
+
+export interface DebugTurnRecord {
+  id: string;
+  createdAt: number;
+  traceId: string;
+  uiSessionId: string;
+  appContext: string;
+  interaction: InteractionData;
+  historyLength: number;
+  promptHistoryLength: number;
+  contextMemoryMode: ContextMemoryMode;
+  viewport: ViewportContext;
+  llmConfig: LLMConfig;
+  systemPrompt: string;
+  userMessage: string;
+  selectedSkillIds: string[];
+  selectedSkills: DebugSkillSnapshot[];
+  qualityGatePass: boolean;
+  qualityScore: number;
+  qualityReasonCodes: string[];
+  retryAttempted: boolean;
+  fallbackShown: boolean;
+  requestFailed: boolean;
+  outputLength: number;
+  episodeId?: string;
+  generationId?: string;
+  errorMessage?: string;
 }
 
 export interface EpisodeRecord {
@@ -177,14 +298,13 @@ export interface SkillTransitionEvent {
 export type SettingsFieldControl = 'select' | 'toggle' | 'number' | 'textarea' | 'password' | 'text';
 
 export type SettingsFieldKey =
-  | 'detailLevel'
   | 'colorTheme'
-  | 'speedMode'
+  | 'loadingUiMode'
+  | 'contextMemoryMode'
   | 'enableAnimations'
-  | 'maxHistoryLength'
-  | 'isStatefulnessEnabled'
   | 'qualityAutoRetryEnabled'
   | 'customSystemPrompt'
+  | 'workspaceRoot'
   | 'googleSearchApiKey'
   | 'googleSearchCx'
   | 'providerId'
@@ -221,4 +341,36 @@ export interface SettingsSkillSchema {
   description: string;
   generatedBy: string;
   sections: SettingsSectionSchema[];
+}
+
+export type OnboardingLifecycle = 'pending' | 'active' | 'completed' | 'revisit';
+
+export type OnboardingCheckpoint =
+  | 'workspace_ready'
+  | 'provider_ready'
+  | 'model_ready'
+  | 'memory_seeded'
+  | 'completed';
+
+export interface OnboardingState {
+  version: string;
+  completed: boolean;
+  lifecycle: OnboardingLifecycle;
+  runId: string;
+  startedAt: string;
+  completedAt: string;
+  reopenedAt: string;
+  workspaceRoot: string;
+  providerConfigured: boolean;
+  providerId: string;
+  modelId: string;
+  toolTier: ToolTier;
+  checkpoints: Record<OnboardingCheckpoint, boolean>;
+  lastError: string;
+}
+
+export interface OnboardingActionResult {
+  ok: boolean;
+  state: OnboardingState;
+  message?: string;
 }

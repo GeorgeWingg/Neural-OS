@@ -5,7 +5,19 @@
 /* tslint:disable */
 import { AppSkill, InteractionData } from '../types';
 
-const SKILL_STORAGE_KEY = 'gemini-os-skill-registry-v1';
+const SKILL_STORAGE_KEY = 'neural-computer-skill-registry-v1';
+const LEGACY_SKILL_STORAGE_KEY = 'gemini-os-skill-registry-v1';
+
+function readSkillStorageRaw(): string | null {
+  const current = localStorage.getItem(SKILL_STORAGE_KEY);
+  if (current) return current;
+  const legacy = localStorage.getItem(LEGACY_SKILL_STORAGE_KEY);
+  if (legacy) {
+    localStorage.setItem(SKILL_STORAGE_KEY, legacy);
+    localStorage.removeItem(LEGACY_SKILL_STORAGE_KEY);
+  }
+  return legacy;
+}
 
 const SKILL_SEEDS: AppSkill[] = [
   {
@@ -82,7 +94,7 @@ function cloneSkills(skills: AppSkill[]): AppSkill[] {
 
 function loadRegistry(): AppSkill[] {
   try {
-    const raw = localStorage.getItem(SKILL_STORAGE_KEY);
+    const raw = readSkillStorageRaw();
     if (!raw) return cloneSkills(SKILL_SEEDS);
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return cloneSkills(SKILL_SEEDS);

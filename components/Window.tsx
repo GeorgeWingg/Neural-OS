@@ -4,7 +4,13 @@
 */
 /* tslint:disable */
 import React, { useEffect, useRef, useState } from 'react';
-import { ColorTheme, EpisodeRating, SpeedMode, StyleConfig, UIDetailLevel } from '../types';
+import {
+  ColorTheme,
+  ContextMemoryDebugSnapshot,
+  DebugTurnRecord,
+  GenerationTimelineFrame,
+  StyleConfig,
+} from '../types';
 
 interface WindowProps {
   title: string;
@@ -15,19 +21,41 @@ interface WindowProps {
   styleConfig: StyleConfig;
   onStyleConfigChange: (updates: Partial<StyleConfig>) => void;
   onOpenSettings: () => void;
+  debugRecords: DebugTurnRecord[];
+  generationTimelineFrames: GenerationTimelineFrame[];
+  contextMemoryDebug: ContextMemoryDebugSnapshot | null;
+  contextMemoryDebugError: string | null;
+  onClearDebugRecords: () => void;
   onExitToDesktop: () => void;
   onGlobalPrompt?: (prompt: string) => void;
   feedbackAvailable: boolean;
   feedbackFailureContext: boolean;
-  feedbackRating: EpisodeRating | null;
-  feedbackReasons: string[];
-  onFeedbackRate: (rating: EpisodeRating) => void;
-  onToggleFeedbackReason: (reason: string) => void;
+  feedbackScore: number | null;
+  feedbackComment: string;
+  feedbackStatusMessage: string | null;
+  onFeedbackScoreSelect: (score: number) => void;
+  onFeedbackCommentChange: (comment: string) => void;
+  onFeedbackSubmit: () => void;
 }
 
-type MenuName = 'feedback' | 'settings' | null;
+type MenuName = 'feedback' | 'settings' | 'debug' | null;
+type DebugLayer = {
+  id: string;
+  title: string;
+  preview: string;
+  fullText: string;
+  tokens: number;
+  color: string;
+  label: string;
+};
 
-const FEEDBACK_REASON_TAGS = ['Layout', 'Readability', 'Navigation', 'Visual Style', 'Too Sparse', 'Too Noisy'];
+type TimelineEventStyle = {
+  pillBg: string;
+  pillText: string;
+  titleText: string;
+};
+
+const FEEDBACK_SCORE_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 const dropdownStyle: React.CSSProperties = {
   position: 'absolute',
@@ -58,6 +86,169 @@ const headerStyle: React.CSSProperties = {
   letterSpacing: '0.05em',
 };
 
+const SKILL_CONTEXT_MARKER = '\n\nSkill Context (retrieved runtime skills, highest priority first):';
+const COMPACTED_MEMORY_HINT_PATTERN = /Server Context Memory Mode:\s*compacted[^\n]*/gi;
+const TIMELINE_EVENT_STYLES: Record<string, TimelineEventStyle> = {
+  start: { pillBg: '#0f172a', pillText: '#e2e8f0', titleText: '#e2e8f0' },
+  stream: { pillBg: '#1e3a8a', pillText: '#dbeafe', titleText: '#bfdbfe' },
+  render_output: { pillBg: '#065f46', pillText: '#d1fae5', titleText: '#a7f3d0' },
+  thought: { pillBg: '#6d28d9', pillText: '#ede9fe', titleText: '#ddd6fe' },
+  tool_call_start: { pillBg: '#7c2d12', pillText: '#ffedd5', titleText: '#fed7aa' },
+  tool_call_result: { pillBg: '#0f766e', pillText: '#ccfbf1', titleText: '#99f6e4' },
+  retry: { pillBg: '#78350f', pillText: '#fef3c7', titleText: '#fde68a' },
+  done: { pillBg: '#14532d', pillText: '#dcfce7', titleText: '#bbf7d0' },
+  error: { pillBg: '#7f1d1d', pillText: '#fee2e2', titleText: '#fecaca' },
+};
+
+function formatTs(value?: number): string {
+  if (!value) return 'n/a';
+  try {
+    return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch {
+    return 'n/a';
+  }
+}
+
+function formatTsPrecise(value?: number): string {
+  if (!value) return 'n/a';
+  try {
+    const date = new Date(value);
+    const base = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return `${base}.${String(date.getMilliseconds()).padStart(3, '0')}`;
+  } catch {
+    return 'n/a';
+  }
+}
+
+function formatTimelineType(type: string): string {
+  return type.replace(/_/g, ' ');
+}
+
+function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0';
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
+  return String(Math.round(value));
+}
+
+function estimateTokens(value: string): number {
+  if (!value) return 0;
+  return Math.max(1, Math.ceil(value.length / 4));
+}
+
+function clipText(value: string, maxChars: number = 120): string {
+  const normalized = (value || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '(empty)';
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars).trimEnd()}...`;
+}
+
+function splitSystemPrompt(systemPrompt: string): { base: string; skillOverlay: string } {
+  const index = systemPrompt.indexOf(SKILL_CONTEXT_MARKER);
+  if (index < 0) return { base: systemPrompt.trim(), skillOverlay: '' };
+  return {
+    base: systemPrompt.slice(0, index).trim(),
+    skillOverlay: systemPrompt.slice(index + SKILL_CONTEXT_MARKER.length).trim(),
+  };
+}
+
+function extractLegacyHistorySegment(userMessage: string): string {
+  const start = userMessage.indexOf('Previous User Interactions');
+  if (start < 0) return '';
+  const end = userMessage.indexOf('Runtime Viewport Context', start);
+  if (end < 0) return userMessage.slice(start).trim();
+  return userMessage.slice(start, end).trim();
+}
+
+function removeMemoryHintsFromUserMessage(userMessage: string): string {
+  return userMessage
+    .replace(COMPACTED_MEMORY_HINT_PATTERN, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function buildDebugLayers(
+  record: DebugTurnRecord,
+  contextMemoryDebug: ContextMemoryDebugSnapshot | null,
+): DebugLayer[] {
+  const { base: basePrompt, skillOverlay } = splitSystemPrompt(record.systemPrompt || '');
+  const legacyHistory = extractLegacyHistorySegment(record.userMessage || '');
+  const userMessageWithoutHistory = legacyHistory
+    ? (record.userMessage || '').replace(legacyHistory, '').trim()
+    : (record.userMessage || '').trim();
+  const userPayload = removeMemoryHintsFromUserMessage(userMessageWithoutHistory);
+
+  const layers: DebugLayer[] = [
+    {
+      id: 'system',
+      title: 'System',
+      preview: clipText(basePrompt || '(missing)'),
+      fullText: (basePrompt || '(missing)').trim(),
+      tokens: estimateTokens(basePrompt),
+      color: '#0ea5e9',
+      label: 'SYS',
+    },
+  ];
+
+  if (skillOverlay || record.selectedSkills.length > 0) {
+    const skillSummary = skillOverlay
+      ? skillOverlay
+      : record.selectedSkills
+          .map((skill) => `${skill.title} (${skill.status}, ${skill.scope}, ${skill.score.toFixed(2)})`)
+          .join(' | ');
+    layers.push({
+      id: 'skills',
+      title: 'Skills',
+      preview: clipText(skillSummary || '(none)'),
+      fullText: (skillSummary || '(none)').trim(),
+      tokens: estimateTokens(skillSummary),
+      color: '#8b5cf6',
+      label: 'SKL',
+    });
+  }
+
+  if (record.contextMemoryMode === 'compacted') {
+    const memoryPreview = contextMemoryDebug
+      ? `lane ${contextMemoryDebug.laneKey} | ${formatTokens(contextMemoryDebug.tokens)}/${formatTokens(contextMemoryDebug.contextWindow)} tk | turns ${contextMemoryDebug.recentTurnCount}`
+      : 'compacted mode enabled; lane snapshot unavailable';
+    layers.push({
+      id: 'memory',
+      title: 'Memory',
+      preview: clipText(memoryPreview),
+      fullText: memoryPreview.trim(),
+      tokens: Math.max(1, contextMemoryDebug?.tokens || estimateTokens(memoryPreview)),
+      color: '#f59e0b',
+      label: 'MEM',
+    });
+  } else if (legacyHistory) {
+    layers.push({
+      id: 'history',
+      title: 'History',
+      preview: clipText(legacyHistory),
+      fullText: legacyHistory.trim(),
+      tokens: estimateTokens(legacyHistory),
+      color: '#f59e0b',
+      label: 'HIS',
+    });
+  }
+
+  layers.push({
+    id: 'turn',
+    title: 'Turn',
+    preview: clipText(userPayload || '(missing)'),
+    fullText: (userPayload || '(missing)').trim(),
+    tokens: estimateTokens(userPayload),
+    color: '#22c55e',
+    label: 'TRN',
+  });
+
+  return layers.filter((layer) => layer.tokens > 0);
+}
+
+function isTauriRuntime(): boolean {
+  if (typeof window === 'undefined') return false;
+  return '__TAURI_INTERNALS__' in window;
+}
+
 export const Window: React.FC<WindowProps> = ({
   title,
   children,
@@ -66,18 +257,36 @@ export const Window: React.FC<WindowProps> = ({
   styleConfig,
   onStyleConfigChange,
   onOpenSettings,
+  debugRecords,
+  generationTimelineFrames,
+  contextMemoryDebug,
+  contextMemoryDebugError,
+  onClearDebugRecords,
   onExitToDesktop,
   onGlobalPrompt,
   feedbackAvailable,
   feedbackFailureContext,
-  feedbackRating,
-  feedbackReasons,
-  onFeedbackRate,
-  onToggleFeedbackReason,
+  feedbackScore,
+  feedbackComment,
+  feedbackStatusMessage,
+  onFeedbackScoreSelect,
+  onFeedbackCommentChange,
+  onFeedbackSubmit,
 }) => {
   const [openMenu, setOpenMenu] = useState<MenuName>(null);
   const [searchValue, setSearchValue] = useState('');
+  const [debugRecordOffset, setDebugRecordOffset] = useState(0);
+  const [expandedLayerIds, setExpandedLayerIds] = useState<string[]>([]);
+  const [contextStackExpanded, setContextStackExpanded] = useState(true);
+  const [timelineExpanded, setTimelineExpanded] = useState(true);
   const menuBarRef = useRef<HTMLDivElement>(null);
+  const titleInset = isTauriRuntime() ? 64 : 0;
+  const hasDebugData = debugRecords.length > 0;
+  const selectedDebugRecord = hasDebugData
+    ? debugRecords[Math.max(0, Math.min(debugRecordOffset, debugRecords.length - 1))]
+    : null;
+  const debugLayers = selectedDebugRecord ? buildDebugLayers(selectedDebugRecord, contextMemoryDebug) : [];
+  const debugLayerTotalTokens = debugLayers.reduce((sum, layer) => sum + layer.tokens, 0);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -89,6 +298,18 @@ export const Window: React.FC<WindowProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  useEffect(() => {
+    if (!debugRecords.length) {
+      setDebugRecordOffset(0);
+      return;
+    }
+    setDebugRecordOffset((prev) => Math.max(0, Math.min(prev, debugRecords.length - 1)));
+  }, [debugRecords.length]);
+
+  useEffect(() => {
+    setExpandedLayerIds([]);
+  }, [selectedDebugRecord?.id]);
+
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (searchValue.trim() && onGlobalPrompt) {
@@ -98,7 +319,13 @@ export const Window: React.FC<WindowProps> = ({
   };
 
   const toggleMenu = (menu: MenuName) => {
-    setOpenMenu((prev) => (prev === menu ? null : menu));
+    setOpenMenu((prev) => {
+      const next = prev === menu ? null : menu;
+      if (next === 'debug') {
+        setDebugRecordOffset(0);
+      }
+      return next;
+    });
   };
 
   const handleSettingsItemClick = (action: () => void) => {
@@ -106,11 +333,13 @@ export const Window: React.FC<WindowProps> = ({
     setOpenMenu(null);
   };
 
-  const detailLevels: { value: UIDetailLevel; label: string }[] = [
-    { value: 'minimal', label: 'Minimal' },
-    { value: 'standard', label: 'Standard' },
-    { value: 'rich', label: 'Rich' },
-  ];
+  const toggleLayerExpanded = (layerId: string) => {
+    setExpandedLayerIds((previous) =>
+      previous.includes(layerId)
+        ? previous.filter((id) => id !== layerId)
+        : [...previous, layerId],
+    );
+  };
 
   const colorThemes: { value: ColorTheme; label: string }[] = [
     { value: 'system', label: 'System' },
@@ -119,23 +348,25 @@ export const Window: React.FC<WindowProps> = ({
     { value: 'colorful', label: 'Colorful' },
   ];
 
-  const speedModes: { value: SpeedMode; label: string }[] = [
-    { value: 'fast', label: 'Fast' },
-    { value: 'balanced', label: 'Balanced' },
-    { value: 'quality', label: 'Quality' },
-  ];
-
-  const historyOptions = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-
   return (
     <div className="w-full h-full bg-white/95 border border-gray-300 flex flex-col relative overflow-hidden font-sans">
       {/* Title Bar */}
-      <div className="bg-gray-800/95 text-white py-2 px-4 font-semibold text-sm flex justify-between items-center select-none cursor-default flex-shrink-0 border-b border-gray-700">
-        <div className="flex items-center gap-2">
-          <span className="tracking-wide uppercase text-xs">{title}</span>
+      <div
+        data-tauri-drag-region
+        className="bg-gray-800/95 text-white py-2 px-4 font-semibold text-sm flex items-center select-none cursor-default flex-shrink-0 border-b border-gray-700"
+      >
+        <div
+          data-tauri-drag-region
+          className="flex items-center gap-2 w-[320px] max-w-[65vw] flex-none overflow-hidden"
+          style={{ paddingLeft: `${titleInset}px` }}
+        >
+          <span data-tauri-drag-region className="tracking-wide uppercase text-xs truncate">
+            {title}
+          </span>
         </div>
+        <div data-tauri-drag-region className="flex-1" />
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 pl-2">
           {isAppOpen && (
             <button
               onClick={onExitToDesktop}
@@ -165,8 +396,8 @@ export const Window: React.FC<WindowProps> = ({
             Feedback ▾
           </span>
           {openMenu === 'feedback' && (
-            <div style={{ ...dropdownStyle, minWidth: '292px', backgroundColor: '#ffffff', borderColor: '#d1d5db' }}>
-              <div style={{ ...headerStyle, color: '#4b5563' }}>Rate Current Screen</div>
+            <div style={{ ...dropdownStyle, minWidth: '332px', backgroundColor: '#ffffff', borderColor: '#d1d5db' }}>
+              <div style={{ ...headerStyle, color: '#4b5563' }}>Rate Current Screen (1-10)</div>
               {!feedbackAvailable ? (
                 <div className="px-4 py-2 text-xs text-gray-500">
                   Generate a screen first to enable feedback.
@@ -178,44 +409,59 @@ export const Window: React.FC<WindowProps> = ({
                       Last render entered fallback mode.
                     </div>
                   )}
-                  <div className="px-3 py-2 flex gap-2">
-                    {([
-                      { label: 'Good', value: 'good' },
-                      { label: 'Okay', value: 'okay' },
-                      { label: 'Bad', value: 'bad' },
-                    ] as const).map((item) => (
-                      <button
-                        key={item.value}
-                        onClick={() => onFeedbackRate(item.value)}
-                        className={`px-2 py-1 rounded text-xs border transition-colors ${
-                          feedbackRating === item.value
-                            ? 'bg-gray-700 border-gray-700 text-white'
-                            : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
-                        }`}
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                  </div>
-                  <div style={{ ...separatorStyle, backgroundColor: '#e5e7eb' }} />
-                  <div style={{ ...headerStyle, color: '#4b5563', paddingTop: '6px' }}>Reasons</div>
-                  <div className="px-3 pb-3 pt-1 flex flex-wrap gap-1.5">
-                    {FEEDBACK_REASON_TAGS.map((reason) => {
-                      const selected = feedbackReasons.includes(reason);
-                      return (
+                  <div className="px-3 pt-2 pb-1">
+                    <div className="grid grid-cols-5 gap-1.5">
+                      {FEEDBACK_SCORE_OPTIONS.map((score) => (
                         <button
-                          key={reason}
-                          onClick={() => onToggleFeedbackReason(reason)}
-                          className={`px-2 py-1 rounded text-[10px] border transition-colors ${
-                            selected
-                              ? 'bg-gray-700 border-gray-700 text-white'
+                          key={score}
+                          onClick={() => onFeedbackScoreSelect(score)}
+                          className={`h-8 rounded border text-xs font-semibold transition-colors ${
+                            feedbackScore === score
+                              ? 'bg-gray-800 border-gray-800 text-white'
                               : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
                           }`}
+                          aria-label={`Rate ${score} out of 10`}
                         >
-                          {reason}
+                          {score}
                         </button>
-                      );
-                    })}
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ ...separatorStyle, backgroundColor: '#e5e7eb' }} />
+                  <div style={{ ...headerStyle, color: '#4b5563', paddingTop: '6px' }}>Comment</div>
+                  <div className="px-3 pb-3 pt-1">
+                    <textarea
+                      value={feedbackComment}
+                      onChange={(event) => onFeedbackCommentChange(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault();
+                          onFeedbackSubmit();
+                        }
+                      }}
+                      placeholder="Add details, then press Enter to submit."
+                      className="w-full min-h-[84px] resize-y rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-gray-500 focus:outline-none"
+                    />
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <div className="text-[10px] text-gray-500">Enter submits. Shift+Enter adds a new line.</div>
+                      <button
+                        onClick={onFeedbackSubmit}
+                        className="h-7 rounded border border-gray-700 bg-gray-800 px-2.5 text-[11px] font-semibold text-white transition-colors hover:bg-gray-700"
+                      >
+                        Submit
+                      </button>
+                    </div>
+                    {feedbackStatusMessage && (
+                      <div
+                        className={`mt-1 text-[11px] ${
+                          feedbackStatusMessage.toLowerCase().includes('pick a score')
+                            ? 'text-amber-700'
+                            : 'text-emerald-700'
+                        }`}
+                      >
+                        {feedbackStatusMessage}
+                      </div>
+                    )}
                   </div>
                 </>
               )}
@@ -235,18 +481,6 @@ export const Window: React.FC<WindowProps> = ({
           </span>
           {openMenu === 'settings' && (
             <div style={{ ...dropdownStyle, backgroundColor: '#ffffff', borderColor: '#d1d5db' }}>
-              <div style={{ ...headerStyle, color: '#4b5563' }}>Detail Level</div>
-              {detailLevels.map((d) => (
-                <div
-                  key={d.value}
-                  className="px-4 py-1.5 cursor-pointer hover:bg-gray-100 text-xs text-gray-700 transition-colors"
-                  onClick={() => handleSettingsItemClick(() => onStyleConfigChange({ detailLevel: d.value }))}
-                >
-                  {styleConfig.detailLevel === d.value ? '● ' : '○ '} {d.label}
-                </div>
-              ))}
-
-              <div style={{ ...separatorStyle, backgroundColor: '#e5e7eb' }} />
               <div style={{ ...headerStyle, color: '#4b5563' }}>Color Theme</div>
               {colorThemes.map((t) => (
                 <div
@@ -259,55 +493,207 @@ export const Window: React.FC<WindowProps> = ({
               ))}
 
               <div style={{ ...separatorStyle, backgroundColor: '#e5e7eb' }} />
-              <div style={{ ...headerStyle, color: '#4b5563' }}>Speed Mode</div>
-              {speedModes.map((s) => (
-                <div
-                  key={s.value}
-                  className="px-4 py-1.5 cursor-pointer hover:bg-gray-100 text-xs text-gray-700 transition-colors"
-                  onClick={() => handleSettingsItemClick(() => onStyleConfigChange({ speedMode: s.value }))}
-                >
-                  {styleConfig.speedMode === s.value ? '● ' : '○ '} {s.label}
-                </div>
-              ))}
-
-              <div style={{ ...separatorStyle, backgroundColor: '#e5e7eb' }} />
-              <div style={{ ...headerStyle, color: '#4b5563' }}>History ({styleConfig.maxHistoryLength})</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', padding: '4px 12px', gap: '4px' }}>
-                {historyOptions.map((n) => (
-                  <span
-                    key={n}
-                    onClick={() => handleSettingsItemClick(() => onStyleConfigChange({ maxHistoryLength: n }))}
-                    className={`px-1.5 py-0.5 rounded cursor-pointer text-[10px] transition-colors ${
-                      styleConfig.maxHistoryLength === n
-                        ? 'bg-gray-700 text-white'
-                        : 'hover:bg-gray-100 text-gray-600'
-                    }`}
-                  >
-                    {n}
-                  </span>
-                ))}
-              </div>
-
-              <div style={{ ...separatorStyle, backgroundColor: '#e5e7eb' }} />
-              <div
-                className="px-4 py-1.5 cursor-pointer hover:bg-gray-100 text-xs text-gray-700 transition-colors flex items-center justify-between"
-                onClick={() =>
-                  handleSettingsItemClick(() =>
-                    onStyleConfigChange({ isStatefulnessEnabled: !styleConfig.isStatefulnessEnabled }),
-                  )
-                }
-              >
-                <span>Statefulness</span>
-                <span>{styleConfig.isStatefulnessEnabled ? 'ON' : 'OFF'}</span>
-              </div>
-
-              <div style={{ ...separatorStyle, backgroundColor: '#e5e7eb' }} />
               <div
                 className="px-4 py-1.5 cursor-pointer hover:bg-gray-100 text-xs text-gray-700 transition-colors font-semibold"
                 onClick={() => handleSettingsItemClick(onOpenSettings)}
               >
                 Advanced Settings...
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* Debug Menu */}
+        <div style={{ position: 'relative', marginLeft: '4px' }}>
+          <span
+            className="cursor-pointer hover:text-gray-900 px-2 py-1 rounded transition-colors"
+            style={openMenu === 'debug' ? { backgroundColor: '#e5e7eb', color: '#111827' } : {}}
+            onClick={() => toggleMenu('debug')}
+            role="button"
+            tabIndex={0}>
+            Debug ▾
+          </span>
+          {openMenu === 'debug' && (
+            <div style={{ ...dropdownStyle, minWidth: '540px', maxWidth: 'min(92vw, 680px)', backgroundColor: '#0b1220', borderColor: '#1f2937', color: '#e2e8f0' }}>
+              <div style={{ ...headerStyle, color: '#93c5fd' }}>Instrumentation</div>
+              {!hasDebugData ? (
+                <div className="px-4 py-4 text-xs text-slate-400">
+                  No captured turns yet. Generate a screen to populate the context stack.
+                </div>
+              ) : (
+                <div className="px-3 pb-3 space-y-2 text-xs">
+                  <div className="rounded border border-slate-700 bg-slate-900/70 p-2">
+                    <button
+                      className="w-full flex items-center justify-between gap-2 text-left"
+                      onClick={() => setContextStackExpanded((previous) => !previous)}
+                    >
+                      <div className="font-semibold text-slate-100">Model Context Stack</div>
+                      <div className="text-[11px] text-slate-300 whitespace-nowrap">
+                        {formatTokens(debugLayerTotalTokens)} tk total {contextStackExpanded ? '▴' : '▾'}
+                      </div>
+                    </button>
+                    {contextStackExpanded && (
+                      <>
+                        <div className="mt-2 h-8 rounded border border-slate-700 overflow-hidden flex">
+                          {debugLayers.map((layer) => {
+                            const pct = debugLayerTotalTokens > 0 ? (layer.tokens / debugLayerTotalTokens) * 100 : 0;
+                            return (
+                              <div
+                                key={`stack_${layer.id}`}
+                                className="h-full flex items-center justify-center text-[10px] font-semibold text-slate-900 border-r border-white/20 last:border-r-0"
+                                style={{
+                                  backgroundColor: layer.color,
+                                  width: `${Math.max(12, pct)}%`,
+                                }}
+                                title={`${layer.title}: ${formatTokens(layer.tokens)} tk`}
+                              >
+                                {layer.label}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div className="mt-2 grid grid-cols-1 gap-1.5">
+                          {debugLayers.map((layer) => {
+                            const pct = debugLayerTotalTokens > 0 ? (layer.tokens / debugLayerTotalTokens) * 100 : 0;
+                            const expanded = expandedLayerIds.includes(layer.id);
+                            return (
+                              <div key={layer.id} className="rounded border border-slate-700 bg-slate-950/70 px-2 py-1.5">
+                                <button
+                                  className="w-full flex items-center justify-between gap-2 text-left"
+                                  onClick={() => toggleLayerExpanded(layer.id)}
+                                >
+                                  <span className="text-[11px] font-semibold text-slate-100">{layer.title}</span>
+                                  <span className="text-[10px] text-slate-300 whitespace-nowrap">
+                                    {formatTokens(layer.tokens)} tk ({pct.toFixed(1)}%) {expanded ? '▴' : '▾'}
+                                  </span>
+                                </button>
+                                {expanded ? (
+                                  <pre className="text-[10px] leading-4 text-slate-300 mt-1 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+                                    {layer.fullText}
+                                  </pre>
+                                ) : (
+                                  <div className="text-[10px] text-slate-400 mt-0.5">{layer.preview}</div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="rounded border border-slate-700 bg-slate-900/70 p-2">
+                    <button
+                      className="w-full flex items-center justify-between gap-2 text-left"
+                      onClick={() => setTimelineExpanded((previous) => !previous)}
+                    >
+                      <div className="font-semibold text-slate-100">Generation Chronology</div>
+                      <div className="text-[11px] text-slate-300 whitespace-nowrap">
+                        {generationTimelineFrames.length} events {timelineExpanded ? '▴' : '▾'}
+                      </div>
+                    </button>
+                    {timelineExpanded && (
+                      <>
+                        {generationTimelineFrames.length === 0 ? (
+                          <div className="mt-2 text-[11px] text-slate-400">
+                            No timeline events captured yet for this generation.
+                          </div>
+                        ) : (
+                          <div className="mt-2">
+                            <div className="text-[10px] text-slate-400 mb-1">
+                              earliest → latest
+                            </div>
+                            <div className="max-h-60 overflow-y-auto space-y-1.5 pr-1">
+                              {generationTimelineFrames.map((frame, index) => {
+                                const style = TIMELINE_EVENT_STYLES[frame.type] || TIMELINE_EVENT_STYLES.stream;
+                                return (
+                                  <div key={frame.id} className="rounded border border-slate-700 bg-slate-950/60 px-2 py-1.5">
+                                    <div className="flex items-start justify-between gap-2">
+                                      <div className="min-w-0">
+                                        <div className="flex items-center gap-1.5 min-w-0">
+                                          <span
+                                            className="inline-flex h-4 min-w-[18px] items-center justify-center rounded px-1 text-[9px] font-semibold"
+                                            style={{ backgroundColor: style.pillBg, color: style.pillText }}
+                                          >
+                                            {index + 1}
+                                          </span>
+                                          <span className="text-[11px] font-semibold truncate" style={{ color: style.titleText }}>
+                                            {frame.label}
+                                          </span>
+                                        </div>
+                                        <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-slate-400">
+                                          <span className="uppercase tracking-wide">{formatTimelineType(frame.type)}</span>
+                                          {frame.toolName && <span>• {frame.toolName}</span>}
+                                          {frame.toolCallId && <span>• {frame.toolCallId}</span>}
+                                        </div>
+                                      </div>
+                                      <span className="text-[10px] text-slate-400 whitespace-nowrap">
+                                        {formatTsPrecise(frame.createdAt)}
+                                      </span>
+                                    </div>
+                                    {frame.detail && (
+                                      <div className="mt-1 text-[10px] text-slate-300 break-words">
+                                        {frame.detail}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  <div className="rounded border border-slate-700 bg-slate-900/70 p-2">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-slate-200 font-semibold">Selected Turn</span>
+                      <span className="text-slate-400">
+                        {debugRecordOffset + 1} / {debugRecords.length}
+                      </span>
+                    </div>
+                    {selectedDebugRecord && (
+                      <div className="mt-1 text-[10px] text-slate-300 space-y-0.5">
+                        <div>{selectedDebugRecord.appContext} • {selectedDebugRecord.llmConfig.providerId}/{selectedDebugRecord.llmConfig.modelId}</div>
+                        <div>{selectedDebugRecord.interaction.type} on {selectedDebugRecord.interaction.elementText || selectedDebugRecord.interaction.id}</div>
+                        <div>{formatTs(selectedDebugRecord.createdAt)} • q={Math.round(selectedDebugRecord.qualityScore * 100)}% • {selectedDebugRecord.qualityGatePass ? 'pass' : 'fail'}</div>
+                        <div>
+                          ctx mode: {selectedDebugRecord.contextMemoryMode}
+                          {contextMemoryDebug
+                            ? ` • lane ${contextMemoryDebug.fillPercent.toFixed(1)}% (${formatTokens(contextMemoryDebug.tokens)}/${formatTokens(contextMemoryDebug.contextWindow)} tk)`
+                            : contextMemoryDebugError
+                            ? ` • lane err ${contextMemoryDebugError}`
+                            : ''}
+                        </div>
+                      </div>
+                    )}
+                    <div className="mt-2 flex items-center gap-1.5">
+                      <button
+                        className="px-2 py-1 rounded border border-slate-600 text-[10px] text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                        onClick={() => setDebugRecordOffset((prev) => Math.min(debugRecords.length - 1, prev + 1))}
+                        disabled={debugRecordOffset >= debugRecords.length - 1}
+                      >
+                        Older
+                      </button>
+                      <button
+                        className="px-2 py-1 rounded border border-slate-600 text-[10px] text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                        onClick={() => setDebugRecordOffset((prev) => Math.max(0, prev - 1))}
+                        disabled={debugRecordOffset <= 0}
+                      >
+                        Newer
+                      </button>
+                      <div className="flex-1" />
+                      <button
+                        className="px-2 py-1 rounded border border-slate-600 text-[10px] text-slate-200 hover:bg-slate-800"
+                        onClick={() => handleSettingsItemClick(onClearDebugRecords)}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -326,7 +712,7 @@ export const Window: React.FC<WindowProps> = ({
       </div>
 
       {/* Content */}
-      <div className="flex-grow min-h-0 overflow-y-auto bg-white">{children}</div>
+      <div className="flex-grow min-h-0 overflow-visible bg-white">{children}</div>
     </div>
   );
 };

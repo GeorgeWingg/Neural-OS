@@ -6,7 +6,7 @@
 
 This contains everything you need to run your app locally.
 
-View your app in AI Studio: https://ai.studio/apps/bundled/gemini_os
+View your app in AI Studio: https://ai.studio/apps/bundled/neural_computer
 
 ## Run Locally
 
@@ -18,3 +18,7 @@ View your app in AI Studio: https://ai.studio/apps/bundled/gemini_os
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+## Self-Improvement Architecture
+
+- Detailed investigation and diagrams: [`docs/self-improvement-system.md`](docs/self-improvement-system.md)

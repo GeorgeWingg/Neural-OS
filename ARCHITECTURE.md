@@ -1,9 +1,22 @@
 This repository uses `gemini-3-flash-preview` exclusively; any other model versions are prohibited.
 
+## Onboarding Runtime (2026-02)
+
+- Onboarding is now a host-enforced runtime lifecycle, not a hardcoded React stepper.
+- The host owns only:
+  - lifecycle state persistence (`.neural/onboarding-state.json`)
+  - onboarding policy/safety gates
+  - onboarding API endpoints
+  - routing first-run users into `onboarding_app`
+- The model owns onboarding UI and conversational flow through `emit_screen`.
+- Filesystem skills remain canonical. During incomplete onboarding, host prompt policy gives onboarding precedence and expects `onboarding_skill`.
+- Tool policy during required onboarding is allowlist-only: `emit_screen`, `onboarding_get_state`, `onboarding_set_workspace_root`, `save_provider_key`, `onboarding_set_model_preferences`, `memory_append`, `onboarding_complete`.
+- `AppSkill` records are deprecated migration debt and must not drive runtime behavior selection.
+
 # Architecture
 
 ## 1. System Overview
-- **Purpose:** Gemini OS is an AI-native desktop simulation where every window’s content is authored by `gemini-3-flash-preview`. The system must stay responsive while authoring fresh content per interaction, honoring user-configured style settings, local statefulness, and the orchestrated set of “skills” described below.
+- **Purpose:** Neural Computer is an AI-native desktop simulation where every window’s content is authored by `gemini-3-flash-preview`. The system must stay responsive while authoring fresh content per interaction, honoring user-configured style settings, local statefulness, and the orchestrated set of “skills” described below.
 - **Primary goals:** (1) Keep the experience deterministic and observable without using RL; (2) surface selected skills and interventions based on interaction telemetry; (3) continuously self-improve the execution reliability of each skill via heuristic scoring, promotion/demotion, and instrumentation.
 - **Success criteria:** each interaction selects a coherent skill set, generates a prompt that respects system rules, and can fallback safely when Gemini responses hit error cases. Self-improvement is measured by rising skill execution success rates, cache hit ratios, and falling request latencies.
 - **Non-goals:** There is no PPO/ILM-style training loop, no model fine-tuning, and no policy gradient. Improvement happens through deterministic, statistics-driven coordination, not data-efficient gradient updates.

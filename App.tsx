@@ -13,40 +13,108 @@ import {
   DEFAULT_LLM_CONFIG,
   DEFAULT_STYLE_CONFIG,
   DESKTOP_APP_DEFINITION,
+  ONBOARDING_APP_DEFINITION,
   SETTINGS_APP_DEFINITION,
 } from './constants';
 import {
   fetchLlmCatalog,
+  getDefaultSettingsSchema,
   generateSettingsSchema,
   saveProviderCredential,
+  StreamClientEvent,
+  StreamRequestDebugSnapshot,
   streamAppContent,
 } from './services/geminiService';
 import { recordFeedbackEvent } from './services/feedbackTelemetry';
 import { saveGenerationRecord, updateGenerationFeedback } from './services/generationTelemetry';
 import { saveEpisode, updateEpisodeFeedback } from './services/interactionTelemetry';
 import { evaluateGeneratedHtml } from './services/renderQualityGate';
+import {
+  applyRenderOutputEvent,
+  createRenderOutputClientState,
+  resolveCanonicalHtml,
+} from './services/renderOutputClient';
+import { getOnboardingState } from './services/onboardingService';
 import { getSessionId } from './services/session';
-import { runSelfImprovementCycle } from './services/selfImprovementCoordinator';
-import { markSkillUsage, retrieveSkills } from './services/skillRegistry';
 import {
   AppDefinition,
+  ContextMemoryDebugSnapshot,
+  DebugSkillSnapshot,
+  DebugTurnRecord,
   EpisodeRating,
+  GenerationTimelineFrame,
   InteractionData,
   LLMConfig,
   SettingsSkillSchema,
   StyleConfig,
   ViewportContext,
+  OnboardingState,
 } from './types';
 
-const SETTINGS_STORAGE_KEY = 'gemini-os-settings';
-const LLM_STORAGE_KEY = 'gemini-os-llm-config';
+const SETTINGS_STORAGE_KEY = 'neural-computer-settings';
+const LLM_STORAGE_KEY = 'neural-computer-llm-config';
+const LOADING_UI_MIGRATION_KEY = 'neural-computer-loading-ui-default-v1';
+const LEGACY_SETTINGS_STORAGE_KEY = 'gemini-os-settings';
+const LEGACY_LLM_STORAGE_KEY = 'gemini-os-llm-config';
+const LEGACY_LOADING_UI_MIGRATION_KEY = 'gemini-os-loading-ui-default-v1';
+const MAX_DEBUG_RECORDS = 80;
+const MAX_GENERATION_TIMELINE_FRAMES = 700;
 type ProviderCatalogEntry = { providerId: string; models: { id: string; name: string }[] };
+const FALLBACK_PROVIDER_CATALOG: ProviderCatalogEntry[] = [
+  {
+    providerId: DEFAULT_LLM_CONFIG.providerId,
+    models: [{ id: DEFAULT_LLM_CONFIG.modelId, name: DEFAULT_LLM_CONFIG.modelId }],
+  },
+];
+
+function mapScoreToEpisodeRating(score: number): EpisodeRating {
+  if (score >= 8) return 'good';
+  if (score >= 4) return 'okay';
+  return 'bad';
+}
+
+function readStorageValueWithLegacyMigration(primaryKey: string, legacyKey: string): string | null {
+  const primary = localStorage.getItem(primaryKey);
+  if (typeof primary === 'string') return primary;
+  const legacy = localStorage.getItem(legacyKey);
+  if (typeof legacy === 'string') {
+    localStorage.setItem(primaryKey, legacy);
+    localStorage.removeItem(legacyKey);
+    return legacy;
+  }
+  return null;
+}
 
 function normalizeToolTier(toolTier: unknown): LLMConfig['toolTier'] {
   if (toolTier === 'none' || toolTier === 'standard' || toolTier === 'experimental') {
     return toolTier;
   }
   return DEFAULT_LLM_CONFIG.toolTier;
+}
+
+function normalizeLoadingUiMode(mode: unknown): StyleConfig['loadingUiMode'] {
+  if (mode === 'immersive' || mode === 'code') {
+    return mode;
+  }
+  // Retired mode: map legacy "minimal" to immersive live preview.
+  if (mode === 'minimal') {
+    return 'immersive';
+  }
+  return DEFAULT_STYLE_CONFIG.loadingUiMode;
+}
+
+function normalizeContextMemoryMode(mode: unknown): StyleConfig['contextMemoryMode'] {
+  if (mode === 'legacy' || mode === 'compacted') {
+    return mode;
+  }
+  return DEFAULT_STYLE_CONFIG.contextMemoryMode;
+}
+
+function normalizeWorkspaceRoot(value: unknown): string {
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value.trim();
+  }
+  return DEFAULT_STYLE_CONFIG.workspaceRoot;
 }
 
 function normalizeLlmConfig(
@@ -95,12 +163,83 @@ function createUiSessionId(): string {
   return `ui_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
+function createDebugRecordId(): string {
+  return `dbg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createTimelineFrameId(): string {
+  return `frame_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function truncateText(value: string, maxLength = 220): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(24, maxLength - 3)).trimEnd()}...`;
+}
+
+function extractThoughtMessage(chunk: string): string | null {
+  const match = chunk.match(/<!--THOUGHT-->([\s\S]*?)<!--\/THOUGHT-->/);
+  const text = match?.[1];
+  if (!text) return null;
+  const normalized = text.trim();
+  return normalized || null;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function normalizeRuntimeErrorMessage(message: string): string {
+  const normalized = (message || '').trim();
+  if (
+    /failed to fetch/i.test(normalized) ||
+    /networkerror/i.test(normalized) ||
+    /err_connection/i.test(normalized)
+  ) {
+    return 'Failed to reach the local runtime API. Ensure the backend server is running (http://localhost:8787).';
+  }
+  return normalized || 'Unknown runtime error.';
+}
+
+const WINDOW_TITLE_MAX_LENGTH = 48;
+const WINDOW_TITLE_PATTERNS: RegExp[] = [
+  /<!--\s*WINDOW_TITLE\s*:\s*([\s\S]{1,120}?)\s*-->/i,
+  /<meta[^>]*name=["']neural-computer-window-title["'][^>]*content=["']([^"']{1,120})["'][^>]*>/i,
+  /<meta[^>]*content=["']([^"']{1,120})["'][^>]*name=["']neural-computer-window-title["'][^>]*>/i,
+  /<meta[^>]*name=["']gemini-os-window-title["'][^>]*content=["']([^"']{1,120})["'][^>]*>/i,
+  /<meta[^>]*content=["']([^"']{1,120})["'][^>]*name=["']gemini-os-window-title["'][^>]*>/i,
+  /data-window-title\s*=\s*["']([^"']{1,120})["']/i,
+];
+
+function normalizeWindowTitleCandidate(value: string): string | null {
+  const withoutTags = value.replace(/<[^>]*>/g, ' ');
+  const cleaned = withoutTags.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return null;
+  if (cleaned.length <= WINDOW_TITLE_MAX_LENGTH) return cleaned;
+  return cleaned.slice(0, WINDOW_TITLE_MAX_LENGTH).trimEnd();
+}
+
+function extractWindowTitleFromGeneratedHtml(content: string): string | null {
+  if (!content) return null;
+  for (const pattern of WINDOW_TITLE_PATTERNS) {
+    const match = content.match(pattern);
+    const candidate = match?.[1];
+    if (!candidate) continue;
+    const normalized = normalizeWindowTitleCandidate(candidate);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function formatTokenCount(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '--';
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(Math.round(value));
 }
 
 function inferRegenerateCount(historyForLlm: InteractionData[]): number {
@@ -111,22 +250,6 @@ function inferRegenerateCount(historyForLlm: InteractionData[]): number {
     }
     return count;
   }, 0);
-}
-
-function buildQualityFallbackHtml(appContext: string | null, reasonCodes: string[]): string {
-  const escapedReasons = reasonCodes.map(escapeHtml).join(', ') || 'unknown_quality_issue';
-  return `
-  <div style="height:100%;min-height:100%;display:flex;align-items:center;justify-content:center;padding:24px;background:linear-gradient(140deg,#091425,#10233f);color:#dbeafe;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-    <div style="max-width:640px;border:1px solid rgba(147,197,253,0.35);background:rgba(15,23,42,0.8);border-radius:14px;padding:18px;">
-      <div style="font-size:12px;letter-spacing:0.06em;text-transform:uppercase;color:#93c5fd;margin-bottom:6px;">Quality Fallback</div>
-      <div style="font-size:20px;font-weight:600;margin-bottom:8px;">Regenerating this screen did not meet quality constraints.</div>
-      <div style="font-size:13px;line-height:1.6;color:#cbd5e1;margin-bottom:12px;">
-        App context: <strong>${escapeHtml(appContext || 'desktop_env')}</strong>
-      </div>
-      <div style="font-size:12px;color:#fbbf24;margin-bottom:16px;">Reason codes: ${escapedReasons}</div>
-      <button data-interaction-id="retry_generation_after_fallback" data-interaction-type="button_press" style="padding:8px 12px;border-radius:10px;border:1px solid #60a5fa;background:#1d4ed8;color:white;cursor:pointer;">Retry Generation</button>
-    </div>
-  </div>`;
 }
 
 function getHostBackground(colorTheme: StyleConfig['colorTheme']): string {
@@ -148,18 +271,43 @@ const App: React.FC = () => {
   const [activeApp, setActiveApp] = useState<AppDefinition | null>(DESKTOP_APP_DEFINITION);
   const [llmContent, setLlmContent] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [generationTimelineFrames, setGenerationTimelineFrames] = useState<GenerationTimelineFrame[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [interactionHistory, setInteractionHistory] = useState<InteractionData[]>([]);
   const [activeTraceId, setActiveTraceId] = useState<string>('');
   const [activeUiSessionId, setActiveUiSessionId] = useState<string>(createUiSessionId());
-  const [activeSkillIds, setActiveSkillIds] = useState<string[]>([]);
+  const [onboardingState, setOnboardingState] = useState<OnboardingState | null>(null);
 
   const [styleConfig, setStyleConfig] = useState<StyleConfig>(() => {
     try {
-      const stored = localStorage.getItem(SETTINGS_STORAGE_KEY);
+      const stored = readStorageValueWithLegacyMigration(SETTINGS_STORAGE_KEY, LEGACY_SETTINGS_STORAGE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);
-        return { ...DEFAULT_STYLE_CONFIG, ...parsed };
+        const parsedRecord = parsed && typeof parsed === 'object' ? (parsed as Partial<StyleConfig>) : {};
+        const merged = {
+          ...DEFAULT_STYLE_CONFIG,
+          ...parsedRecord,
+          loadingUiMode: normalizeLoadingUiMode((parsed as Record<string, unknown>)?.loadingUiMode),
+          contextMemoryMode: normalizeContextMemoryMode((parsed as Record<string, unknown>)?.contextMemoryMode),
+          workspaceRoot: normalizeWorkspaceRoot((parsed as Record<string, unknown>)?.workspaceRoot),
+        };
+
+        // TODO(neural-onboarding): own first-run workspace initialization and selection flow.
+        // One-time migration: preserve explicit non-immersive choices, but move
+        // implicit legacy defaults to code-stream mode.
+        const migrationDone =
+          localStorage.getItem(LOADING_UI_MIGRATION_KEY) === '1' ||
+          localStorage.getItem(LEGACY_LOADING_UI_MIGRATION_KEY) === '1';
+        if (!migrationDone) {
+          const hasSavedLoadingMode = Object.prototype.hasOwnProperty.call(parsedRecord, 'loadingUiMode');
+          if (!hasSavedLoadingMode || parsedRecord.loadingUiMode === 'immersive') {
+            merged.loadingUiMode = DEFAULT_STYLE_CONFIG.loadingUiMode;
+          }
+          localStorage.setItem(LOADING_UI_MIGRATION_KEY, '1');
+          localStorage.removeItem(LEGACY_LOADING_UI_MIGRATION_KEY);
+        }
+
+        return merged;
       }
     } catch {
       // Ignore parse errors and use defaults.
@@ -169,7 +317,7 @@ const App: React.FC = () => {
 
   const [llmConfig, setLlmConfig] = useState<LLMConfig>(() => {
     try {
-      const stored = localStorage.getItem(LLM_STORAGE_KEY);
+      const stored = readStorageValueWithLegacyMigration(LLM_STORAGE_KEY, LEGACY_LLM_STORAGE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);
         return normalizeLlmConfig(parsed);
@@ -180,25 +328,26 @@ const App: React.FC = () => {
     return normalizeLlmConfig();
   });
 
-  const [providers, setProviders] = useState<{ providerId: string; models: { id: string; name: string }[] }[]>([]);
+  const [providers, setProviders] = useState<ProviderCatalogEntry[]>(FALLBACK_PROVIDER_CATALOG);
 
-  const [settingsSchema, setSettingsSchema] = useState<SettingsSkillSchema | null>(null);
+  const [settingsSchema, setSettingsSchema] = useState<SettingsSkillSchema>(() => getDefaultSettingsSchema());
   const [isLoadingSettingsSchema, setIsLoadingSettingsSchema] = useState(false);
   const [settingsStatusMessage, setSettingsStatusMessage] = useState<string | undefined>();
   const [settingsErrorMessage, setSettingsErrorMessage] = useState<string | null>(null);
   const [latestEpisodeId, setLatestEpisodeId] = useState<string | null>(null);
   const [latestGenerationId, setLatestGenerationId] = useState<string | null>(null);
-  const [feedbackRating, setFeedbackRating] = useState<EpisodeRating | null>(null);
-  const [feedbackReasons, setFeedbackReasons] = useState<string[]>([]);
+  const [feedbackScore, setFeedbackScore] = useState<number | null>(null);
+  const [feedbackComment, setFeedbackComment] = useState('');
+  const [feedbackStatusMessage, setFeedbackStatusMessage] = useState<string | null>(null);
   const [feedbackFailureContext, setFeedbackFailureContext] = useState(false);
-
-  // Statefulness cache
-  const [appContentCache, setAppContentCache] = useState<Record<string, string>>({});
-  const [currentAppPath, setCurrentAppPath] = useState<string[]>(['desktop_env']);
-  const [cacheEligible, setCacheEligible] = useState(true);
+  const [contextMemoryDebug, setContextMemoryDebug] = useState<ContextMemoryDebugSnapshot | null>(null);
+  const [contextMemoryDebugError, setContextMemoryDebugError] = useState<string | null>(null);
+  const [debugRecords, setDebugRecords] = useState<DebugTurnRecord[]>([]);
 
   const abortControllerRef = React.useRef<AbortController | null>(null);
   const contentViewportRef = React.useRef<HTMLDivElement | null>(null);
+  const hasRefreshedSettingsSchemaRef = React.useRef(false);
+  const hasInitializedAppRef = React.useRef(false);
 
   useEffect(() => {
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(styleConfig));
@@ -259,66 +408,27 @@ const App: React.FC = () => {
     });
   }, [providers]);
 
-  const getCacheKey = useCallback(
-    (path: string[]): string => {
-      const basePath = path.join('__');
-      return [
-        basePath,
-        styleConfig.detailLevel,
-        styleConfig.colorTheme,
-        styleConfig.speedMode,
-        String(styleConfig.maxHistoryLength),
-        String(styleConfig.enableAnimations),
-        String(styleConfig.isStatefulnessEnabled),
-        llmConfig.providerId,
-        llmConfig.modelId,
-        llmConfig.toolTier,
-      ].join('::');
-    },
-    [
-      styleConfig.detailLevel,
-      styleConfig.colorTheme,
-      styleConfig.speedMode,
-      styleConfig.maxHistoryLength,
-      styleConfig.enableAnimations,
-      styleConfig.isStatefulnessEnabled,
-      llmConfig.providerId,
-      llmConfig.modelId,
-      llmConfig.toolTier,
-    ],
-  );
-
   const handleStyleConfigChange = useCallback((updates: Partial<StyleConfig>) => {
-    setStyleConfig((prev) => {
-      const next = { ...prev, ...updates };
-
-      // Cache invalidation when important behavior changes.
-      if (
-        updates.isStatefulnessEnabled === false ||
-        updates.detailLevel !== undefined ||
-        updates.colorTheme !== undefined ||
-        updates.speedMode !== undefined ||
-        updates.maxHistoryLength !== undefined ||
-        updates.enableAnimations !== undefined
-      ) {
-        setAppContentCache({});
-      }
-
-      return next;
-    });
+    setStyleConfig((prev) => ({ ...prev, ...updates }));
   }, []);
 
-  const refreshSettingsSchema = useCallback(async () => {
-    setIsLoadingSettingsSchema(true);
-    setSettingsErrorMessage(null);
+  const refreshSettingsSchema = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    if (!silent) {
+      setIsLoadingSettingsSchema(true);
+      setSettingsErrorMessage(null);
+    }
     try {
       const schema = await generateSettingsSchema(sessionId, styleConfig, llmConfig);
       setSettingsSchema(schema);
     } catch (schemaError) {
-      const message = schemaError instanceof Error ? schemaError.message : String(schemaError);
-      setSettingsErrorMessage(`Failed to generate settings schema: ${message}`);
+      if (!silent) {
+        const message = schemaError instanceof Error ? schemaError.message : String(schemaError);
+        setSettingsErrorMessage(`Failed to generate settings schema: ${message}`);
+      }
     } finally {
-      setIsLoadingSettingsSchema(false);
+      if (!silent) {
+        setIsLoadingSettingsSchema(false);
+      }
     }
   }, [sessionId, styleConfig, llmConfig]);
 
@@ -349,61 +459,189 @@ const App: React.FC = () => {
 
       const traceId = createTraceId();
       const uiSessionId = createUiSessionId();
-      const selectedSkills = retrieveSkills(historyForLlm, 3);
-      const selectedSkillIds = selectedSkills.map((skill) => skill.id);
+      const selectedSkillIds: string[] = [];
       const startedAt = Date.now();
       const appContext = historyForLlm[0]?.appContext || 'desktop_env';
       const requestViewport = getTurnViewportContext();
+      let preparedRequestSnapshot: StreamRequestDebugSnapshot | null = null;
+      let lastRuntimeErrorMessage: string | null = null;
+      const appendTimelineFrame = (
+        frame: Omit<GenerationTimelineFrame, 'id' | 'createdAt'>,
+      ) => {
+        const nextFrame: GenerationTimelineFrame = {
+          ...frame,
+          id: createTimelineFrameId(),
+          createdAt: Date.now(),
+        };
+        setGenerationTimelineFrames((previous) => {
+          const next = [...previous, nextFrame];
+          if (next.length <= MAX_GENERATION_TIMELINE_FRAMES) return next;
+          return [next[0], ...next.slice(next.length - (MAX_GENERATION_TIMELINE_FRAMES - 1))];
+        });
+      };
 
       setActiveTraceId(traceId);
       setActiveUiSessionId(uiSessionId);
-      setActiveSkillIds(selectedSkillIds);
       setIsLoading(true);
       setError(null);
       setLatestEpisodeId(null);
       setLatestGenerationId(null);
-      setFeedbackRating(null);
-      setFeedbackReasons([]);
+      setFeedbackScore(null);
+      setFeedbackComment('');
+      setFeedbackStatusMessage(null);
       setFeedbackFailureContext(false);
-      setCacheEligible(false);
+      setGenerationTimelineFrames([
+        {
+          id: createTimelineFrameId(),
+          type: 'start',
+          createdAt: Date.now(),
+          label: 'Generation started',
+          detail: `${llmConfig.providerId}/${llmConfig.modelId}`,
+          htmlSnapshot: '',
+        },
+      ]);
 
       const runAttempt = async (retryHint?: string) => {
         let accumulated = '';
+        let textChunkChars = 0;
         let failed = false;
+        let lastStreamFrameAt = 0;
+        let lastStreamFrameLength = 0;
+        let renderOutputState = createRenderOutputClientState();
+        lastRuntimeErrorMessage = null;
         try {
           const stream = streamAppContent(
             historyForLlm,
             config,
             llmConfig,
             sessionId,
-            selectedSkills,
             requestViewport,
             retryHint,
+            {
+              onPreparedRequest: (snapshot) => {
+                preparedRequestSnapshot = snapshot;
+              },
+              onStreamEvent: (event: StreamClientEvent) => {
+                if (signal.aborted) return;
+                if (event.type === 'render_output') {
+                  renderOutputState = applyRenderOutputEvent(renderOutputState, event);
+                  accumulated = resolveCanonicalHtml(renderOutputState);
+                  setLlmContent(accumulated);
+                  appendTimelineFrame({
+                    type: 'render_output',
+                    label: `Screen revision ${event.revision}`,
+                    detail: truncateText(
+                      event.revisionNote ||
+                        `${accumulated.length.toLocaleString()} chars${event.isFinal ? ' (final hint)' : ''}`,
+                      220,
+                    ),
+                    htmlSnapshot: accumulated,
+                    toolName: event.toolName,
+                    toolCallId: event.toolCallId,
+                  });
+                  return;
+                }
+                if (event.type === 'tool_call_start') {
+                  appendTimelineFrame({
+                    type: 'tool_call_start',
+                    label: `Tool started: ${event.toolName || 'tool'}`,
+                    detail: event.toolCallId ? `call ${event.toolCallId}` : undefined,
+                    htmlSnapshot: accumulated,
+                    toolName: event.toolName,
+                    toolCallId: event.toolCallId,
+                  });
+                  return;
+                }
+                if (event.type === 'tool_call_result') {
+                  appendTimelineFrame({
+                    type: 'tool_call_result',
+                    label: `Tool ${event.isError ? 'failed' : 'completed'}: ${event.toolName || 'tool'}`,
+                    detail: event.text ? truncateText(event.text, 200) : undefined,
+                    htmlSnapshot: accumulated,
+                    toolName: event.toolName,
+                    toolCallId: event.toolCallId,
+                    isError: Boolean(event.isError),
+                  });
+                  return;
+                }
+                if (event.type === 'error') {
+                  appendTimelineFrame({
+                    type: 'error',
+                    label: 'Runtime stream error',
+                    detail: truncateText(event.error, 240),
+                    htmlSnapshot: accumulated,
+                    isError: true,
+                  });
+                }
+              },
+            },
           );
 
           for await (const chunk of stream) {
             if (signal.aborted) {
-              return { content: accumulated, failed, aborted: true };
+              const contentOnAbort = failed ? accumulated : resolveCanonicalHtml(renderOutputState);
+              return { content: contentOnAbort, failed, aborted: true };
             }
-            accumulated += chunk;
-            setLlmContent((prev) => prev + chunk);
+            const thoughtText = extractThoughtMessage(chunk);
+            if (thoughtText) {
+              const normalizedThought = truncateText(thoughtText, 200);
+              const isToolStatusThought =
+                normalizedThought.startsWith('[System] Tool ') ||
+                normalizedThought.startsWith('[System] Resolving tool call');
+              if (!isToolStatusThought) {
+                appendTimelineFrame({
+                  type: 'thought',
+                  label: 'Reasoning update',
+                  detail: normalizedThought,
+                  htmlSnapshot: accumulated,
+                });
+              }
+              continue;
+            }
+            textChunkChars += chunk.length;
+            if (!renderOutputState.hasRenderOutput) {
+              continue;
+            }
+
+            const now = Date.now();
+            const lengthDelta = accumulated.length - lastStreamFrameLength;
+            if (lastStreamFrameAt === 0 || lengthDelta >= 220 || now - lastStreamFrameAt >= 420) {
+              lastStreamFrameAt = now;
+              lastStreamFrameLength = accumulated.length;
+              appendTimelineFrame({
+                type: 'stream',
+                label: 'Post-render stream update',
+                detail: `${textChunkChars.toLocaleString()} text chars`,
+                htmlSnapshot: accumulated,
+              });
+            }
           }
         } catch (requestError: any) {
           failed = true;
           if (requestError?.name === 'AbortError') {
             return { content: accumulated, failed, aborted: true };
           }
-          const message =
+          const rawMessage =
             requestError instanceof Error
               ? requestError.message
               : String(requestError || 'Unknown runtime error.');
+          const message = normalizeRuntimeErrorMessage(rawMessage);
+          lastRuntimeErrorMessage = message;
           setError(message);
           const fallback = `<div class="p-4 text-red-600 bg-red-100 rounded-md"><strong>Runtime Error:</strong> ${escapeHtml(message)}</div>`;
           setLlmContent(fallback);
           accumulated = fallback;
+          appendTimelineFrame({
+            type: 'error',
+            label: 'Generation failed',
+            detail: truncateText(message, 240),
+            htmlSnapshot: accumulated,
+            isError: true,
+          });
           console.error(requestError);
         }
-        return { content: accumulated, failed, aborted: false };
+        const content = failed ? accumulated : resolveCanonicalHtml(renderOutputState);
+        return { content, failed, aborted: false };
       };
 
       let finalContent = '';
@@ -427,6 +665,12 @@ const App: React.FC = () => {
         : evaluateGeneratedHtml(finalContent, appContext);
       if (!requestFailed && !qualityResult.pass && config.qualityAutoRetryEnabled) {
         retryAttempted = true;
+        appendTimelineFrame({
+          type: 'retry',
+          label: 'Quality retry started',
+          detail: truncateText(qualityResult.correctiveHint, 220),
+          htmlSnapshot: '',
+        });
         setLlmContent('');
         const secondAttempt = await runAttempt(qualityResult.correctiveHint);
         if (secondAttempt.aborted || signal.aborted) return;
@@ -435,23 +679,25 @@ const App: React.FC = () => {
         qualityResult = evaluateGeneratedHtml(finalContent, appContext);
       }
 
-      if (!requestFailed && !qualityResult.pass) {
-        fallbackShown = true;
-        finalContent = buildQualityFallbackHtml(appContext, qualityResult.reasonCodes);
-        setLlmContent(finalContent);
-        setFeedbackFailureContext(true);
-      } else if (requestFailed) {
+      if (requestFailed) {
         fallbackShown = true;
         setFeedbackFailureContext(true);
       }
 
       if (!signal.aborted) {
         setIsLoading(false);
+        appendTimelineFrame({
+          type: requestFailed ? 'error' : 'done',
+          label: requestFailed ? 'Generation completed with fallback' : 'Generation completed',
+          detail: requestFailed
+            ? truncateText(lastRuntimeErrorMessage || 'Fallback rendered.', 220)
+            : `${finalContent.length.toLocaleString()} chars`,
+          htmlSnapshot: finalContent,
+          isError: requestFailed,
+        });
       }
 
       const acceptedByUser = !requestFailed && qualityResult.pass && !fallbackShown && finalContent.length > 0;
-      setCacheEligible(acceptedByUser);
-      markSkillUsage(selectedSkillIds, acceptedByUser);
       const episodeId = `episode_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       saveEpisode({
         id: episodeId,
@@ -487,57 +733,177 @@ const App: React.FC = () => {
       });
       setLatestGenerationId(generationRecord.id);
 
-      const cycle = runSelfImprovementCycle();
-      if (cycle.transitions.length) {
-        console.info('[SelfImprovement] Skill status transitions applied.', cycle.transitions);
+      const selectedSkillSnapshots: DebugSkillSnapshot[] = [];
+      const debugRecord: DebugTurnRecord = {
+        id: createDebugRecordId(),
+        createdAt: Date.now(),
+        traceId,
+        uiSessionId,
+        appContext,
+        interaction: historyForLlm[0],
+        historyLength: historyForLlm.length,
+        promptHistoryLength:
+          preparedRequestSnapshot?.promptHistoryLength ?? (config.contextMemoryMode === 'legacy' ? historyForLlm.length : 1),
+        contextMemoryMode: preparedRequestSnapshot?.contextMemoryMode || config.contextMemoryMode,
+        viewport: preparedRequestSnapshot?.viewport || requestViewport,
+        llmConfig,
+        systemPrompt: preparedRequestSnapshot?.systemPrompt || '',
+        userMessage: preparedRequestSnapshot?.userMessage || '',
+        selectedSkillIds,
+        selectedSkills: preparedRequestSnapshot?.activeSkills || selectedSkillSnapshots,
+        qualityGatePass: qualityResult.pass,
+        qualityScore: qualityResult.score,
+        qualityReasonCodes: qualityResult.reasonCodes,
+        retryAttempted,
+        fallbackShown,
+        requestFailed,
+        outputLength: finalContent.length,
+        episodeId,
+        generationId: generationRecord.id,
+        errorMessage: lastRuntimeErrorMessage || undefined,
+      };
+      setDebugRecords((previous) => [debugRecord, ...previous].slice(0, MAX_DEBUG_RECORDS));
+      try {
+        const nextOnboardingState = await getOnboardingState(sessionId, config.workspaceRoot);
+        setOnboardingState(nextOnboardingState);
+        if (
+          nextOnboardingState.workspaceRoot &&
+          nextOnboardingState.workspaceRoot !== config.workspaceRoot
+        ) {
+          setStyleConfig((previous) => ({
+            ...previous,
+            workspaceRoot: nextOnboardingState.workspaceRoot,
+          }));
+        }
+      } catch (onboardingRefreshError) {
+        console.warn('[Onboarding] Failed to refresh onboarding state after generation.', onboardingRefreshError);
       }
+
     },
     [llmConfig, sessionId, getTurnViewportContext],
   );
 
-  // Initial load
+  // Initial load: route to onboarding first when onboarding is incomplete.
   useEffect(() => {
-    if (activeApp?.id === 'desktop_env' && llmContent === '' && !isLoading) {
-      const initialInteraction: InteractionData = {
-        id: 'desktop_env',
-        type: 'app_open',
-        elementText: DESKTOP_APP_DEFINITION.name,
-        elementType: 'system',
-        appContext: 'desktop_env',
-        source: 'host',
-      };
-      setInteractionHistory([initialInteraction]);
-      internalHandleLlmRequest([initialInteraction], styleConfig);
-    }
-  }, []);
+    if (hasInitializedAppRef.current) return;
+    hasInitializedAppRef.current = true;
 
-  useEffect(() => {
-    if (activeApp?.id === SETTINGS_APP_DEFINITION.id) {
-      refreshSettingsSchema();
-    }
-  }, [activeApp?.id, refreshSettingsSchema]);
-
-  // Cache completed content
-  useEffect(() => {
-    if (!isLoading && currentAppPath.length > 0 && styleConfig.isStatefulnessEnabled && llmContent) {
-      if (!cacheEligible) return;
-      const cacheKey = getCacheKey(currentAppPath);
-      if (appContentCache[cacheKey] !== llmContent) {
-        setAppContentCache((prevCache) => ({
-          ...prevCache,
-          [cacheKey]: llmContent,
-        }));
+    let cancelled = false;
+    const bootstrap = async () => {
+      try {
+        const state = await getOnboardingState(sessionId, styleConfig.workspaceRoot);
+        if (cancelled) return;
+        setOnboardingState(state);
+        if (state.workspaceRoot && state.workspaceRoot !== styleConfig.workspaceRoot) {
+          setStyleConfig((previous) => ({
+            ...previous,
+            workspaceRoot: state.workspaceRoot,
+          }));
+        }
+        const launchApp = state.completed ? DESKTOP_APP_DEFINITION : ONBOARDING_APP_DEFINITION;
+        const initialInteraction: InteractionData = {
+          id: launchApp.id,
+          type: 'app_open',
+          elementText: launchApp.name,
+          elementType: 'system',
+          appContext: launchApp.id,
+          source: 'host',
+        };
+        setInteractionHistory([initialInteraction]);
+        setActiveApp(launchApp);
+        internalHandleLlmRequest([initialInteraction], styleConfig);
+      } catch (bootstrapError) {
+        if (cancelled) return;
+        console.warn('[Onboarding] Failed to load onboarding state, defaulting to desktop.', bootstrapError);
+        const fallbackInteraction: InteractionData = {
+          id: DESKTOP_APP_DEFINITION.id,
+          type: 'app_open',
+          elementText: DESKTOP_APP_DEFINITION.name,
+          elementType: 'system',
+          appContext: DESKTOP_APP_DEFINITION.id,
+          source: 'host',
+        };
+        setInteractionHistory([fallbackInteraction]);
+        setActiveApp(DESKTOP_APP_DEFINITION);
+        internalHandleLlmRequest([fallbackInteraction], styleConfig);
       }
-    }
-  }, [
-    llmContent,
-    isLoading,
-    currentAppPath,
-    styleConfig.isStatefulnessEnabled,
-    cacheEligible,
-    appContentCache,
-    getCacheKey,
-  ]);
+    };
+
+    void bootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [internalHandleLlmRequest, sessionId, styleConfig]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timerId: number | null = null;
+
+    const pollContextMemory = async () => {
+      if (styleConfig.contextMemoryMode !== 'compacted') {
+        if (!cancelled) {
+          setContextMemoryDebug(null);
+          setContextMemoryDebugError(null);
+        }
+        return;
+      }
+
+      const appContext = activeApp?.id || 'desktop_env';
+      const endpoint = `/api/debug/context-memory?sessionId=${encodeURIComponent(sessionId)}&appContext=${encodeURIComponent(appContext)}`;
+      try {
+        const response = await fetch(endpoint);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        const lane = Array.isArray(payload?.lanes) && payload.lanes.length > 0 ? payload.lanes[0] : null;
+        if (!lane) {
+          if (!cancelled) {
+            setContextMemoryDebug(null);
+            setContextMemoryDebugError(null);
+          }
+          return;
+        }
+
+        const estimate = lane.lastEstimate || {};
+        const tokens = typeof estimate.tokens === 'number' ? estimate.tokens : 0;
+        const contextWindow = typeof estimate.contextWindow === 'number' ? estimate.contextWindow : 0;
+        const threshold = typeof estimate.threshold === 'number' ? estimate.threshold : 0;
+        const fillPercent = contextWindow > 0 ? Math.max(0, Math.min(100, (tokens / contextWindow) * 100)) : 0;
+
+        if (!cancelled) {
+          setContextMemoryDebug({
+            laneKey: String(lane.laneKey || ''),
+            fillPercent,
+            tokens,
+            contextWindow,
+            threshold,
+            recentTurnCount: Number(lane.recentTurnCount || 0),
+            summaryLength: Number(lane.summaryLength || 0),
+            compactionInFlight: Boolean(lane.compactionInFlight),
+            compactionQueued: Boolean(lane.compactionQueued),
+            updatedAt: Date.now(),
+          });
+          setContextMemoryDebugError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setContextMemoryDebug(null);
+          setContextMemoryDebugError(error instanceof Error ? error.message : String(error));
+        }
+      }
+    };
+
+    pollContextMemory();
+    timerId = window.setInterval(pollContextMemory, 1000);
+
+    return () => {
+      cancelled = true;
+      if (timerId !== null) {
+        window.clearInterval(timerId);
+      }
+    };
+  }, [activeApp?.id, sessionId, styleConfig.contextMemoryMode]);
 
   const handleAppOpen = useCallback(
     (app: AppDefinition) => {
@@ -553,21 +919,22 @@ const App: React.FC = () => {
       const newHistory = [initialInteraction];
       setInteractionHistory(newHistory);
 
-      const appPath = [app.id];
-      setCurrentAppPath(appPath);
-      const cacheKey = getCacheKey(appPath);
-
       setActiveApp(app);
       setLlmContent('');
+      setGenerationTimelineFrames([]);
       setError(null);
       setLatestEpisodeId(null);
       setLatestGenerationId(null);
-      setFeedbackRating(null);
-      setFeedbackReasons([]);
+      setFeedbackScore(null);
+      setFeedbackComment('');
+      setFeedbackStatusMessage(null);
       setFeedbackFailureContext(false);
 
       if (app.id === SETTINGS_APP_DEFINITION.id) {
-        refreshSettingsSchema();
+        if (!hasRefreshedSettingsSchemaRef.current) {
+          hasRefreshedSettingsSchemaRef.current = true;
+          void refreshSettingsSchema({ silent: true });
+        }
         setIsLoading(false);
         return;
       }
@@ -577,20 +944,9 @@ const App: React.FC = () => {
         return;
       }
 
-      if (styleConfig.isStatefulnessEnabled && appContentCache[cacheKey]) {
-        setLlmContent(appContentCache[cacheKey]);
-        setIsLoading(false);
-      } else {
-        internalHandleLlmRequest(newHistory, styleConfig);
-      }
+      internalHandleLlmRequest(newHistory, styleConfig);
     },
-    [
-      appContentCache,
-      getCacheKey,
-      internalHandleLlmRequest,
-      refreshSettingsSchema,
-      styleConfig,
-    ],
+    [internalHandleLlmRequest, refreshSettingsSchema, styleConfig],
   );
 
   const handleOpenSettings = useCallback(() => {
@@ -598,7 +954,10 @@ const App: React.FC = () => {
   }, [handleAppOpen]);
 
   const handleCloseAppView = useCallback(() => {
-    const desktopApp = DESKTOP_APP_DEFINITION;
+    const desktopApp =
+      onboardingState && !onboardingState.completed
+        ? ONBOARDING_APP_DEFINITION
+        : DESKTOP_APP_DEFINITION;
     const initialInteraction: InteractionData = {
       id: desktopApp.id,
       type: 'app_open',
@@ -609,24 +968,18 @@ const App: React.FC = () => {
     };
 
     setInteractionHistory([initialInteraction]);
-    setCurrentAppPath([desktopApp.id]);
     setActiveApp(desktopApp);
     setLlmContent('');
+    setGenerationTimelineFrames([]);
     setError(null);
     setLatestEpisodeId(null);
     setLatestGenerationId(null);
-    setFeedbackRating(null);
-    setFeedbackReasons([]);
+    setFeedbackScore(null);
+    setFeedbackComment('');
+    setFeedbackStatusMessage(null);
     setFeedbackFailureContext(false);
-    setCacheEligible(true);
-
-    const cacheKey = getCacheKey([desktopApp.id]);
-    if (styleConfig.isStatefulnessEnabled && appContentCache[cacheKey]) {
-      setLlmContent(appContentCache[cacheKey]);
-    } else {
-      internalHandleLlmRequest([initialInteraction], styleConfig);
-    }
-  }, [appContentCache, getCacheKey, internalHandleLlmRequest, styleConfig]);
+    internalHandleLlmRequest([initialInteraction], styleConfig);
+  }, [internalHandleLlmRequest, onboardingState, styleConfig]);
 
   const handleInteraction = useCallback(
     async (interactionData: InteractionData) => {
@@ -635,10 +988,12 @@ const App: React.FC = () => {
         return;
       }
 
-      const knownApp = [...APP_DEFINITIONS_CONFIG, SETTINGS_APP_DEFINITION].find(
+      const knownApp = [...APP_DEFINITIONS_CONFIG, SETTINGS_APP_DEFINITION, ONBOARDING_APP_DEFINITION].find(
         (app) => app.id === interactionData.id,
       );
-      if (knownApp) {
+      const isDesktopAppLaunch =
+        interactionData.source === 'host' || interactionData.appContext === 'desktop_env';
+      if (knownApp && isDesktopAppLaunch) {
         handleAppOpen(knownApp);
         return;
       }
@@ -650,31 +1005,17 @@ const App: React.FC = () => {
           uiSessionId: interactionData.uiSessionId || activeUiSessionId,
           source: interactionData.source || 'iframe',
         },
-        ...interactionHistory.slice(0, styleConfig.maxHistoryLength - 1),
+        ...interactionHistory,
       ];
       setInteractionHistory(newHistory);
 
-      const newPath = activeApp ? [...currentAppPath, interactionData.id] : [interactionData.id];
-      setCurrentAppPath(newPath);
-      const cacheKey = getCacheKey(newPath);
-
       setLlmContent('');
       setError(null);
-
-      if (styleConfig.isStatefulnessEnabled && appContentCache[cacheKey]) {
-        setLlmContent(appContentCache[cacheKey]);
-        setIsLoading(false);
-      } else {
-        internalHandleLlmRequest(newHistory, styleConfig);
-      }
+      internalHandleLlmRequest(newHistory, styleConfig);
     },
     [
-      activeApp,
       activeTraceId,
       activeUiSessionId,
-      appContentCache,
-      currentAppPath,
-      getCacheKey,
       handleAppOpen,
       handleCloseAppView,
       interactionHistory,
@@ -702,6 +1043,10 @@ const App: React.FC = () => {
   const handleSaveSettings = useCallback(
     async (nextStyle: StyleConfig, nextLlm: LLMConfig, providerApiKey?: string) => {
       const normalizedLlm = normalizeLlmConfig(nextLlm, providers);
+      const normalizedStyle: StyleConfig = {
+        ...nextStyle,
+        workspaceRoot: normalizeWorkspaceRoot(nextStyle.workspaceRoot),
+      };
       setSettingsErrorMessage(null);
       setSettingsStatusMessage(undefined);
 
@@ -716,16 +1061,8 @@ const App: React.FC = () => {
         }
       }
 
-      setStyleConfig(nextStyle);
+      setStyleConfig(normalizedStyle);
       setLlmConfig(normalizedLlm);
-      setAppContentCache({});
-
-      try {
-        const schema = await generateSettingsSchema(sessionId, nextStyle, normalizedLlm);
-        setSettingsSchema(schema);
-      } catch {
-        // Schema generation failures are non-blocking after save.
-      }
     },
     [providers, sessionId],
   );
@@ -733,8 +1070,6 @@ const App: React.FC = () => {
   const submitFeedback = useCallback(
     (rating: EpisodeRating, reasons: string[]) => {
       if (!latestEpisodeId) return;
-      setFeedbackRating(rating);
-      setFeedbackReasons(reasons);
       updateEpisodeFeedback(latestEpisodeId, rating, reasons);
       if (latestGenerationId) {
         updateGenerationFeedback(latestGenerationId, rating, reasons);
@@ -747,101 +1082,53 @@ const App: React.FC = () => {
         reasons,
       });
 
-      const cycle = runSelfImprovementCycle();
-      if (cycle.transitions.length) {
-        console.info('[SelfImprovement] Skill status transitions applied after feedback.', cycle.transitions);
-      }
     },
     [activeApp?.id, latestEpisodeId, latestGenerationId],
   );
 
-  const handleFeedbackRate = useCallback(
-    (rating: EpisodeRating) => {
-      submitFeedback(rating, feedbackReasons);
+  const handleFeedbackScoreSelect = useCallback(
+    (score: number) => {
+      const normalizedScore = Math.max(1, Math.min(10, Math.round(score)));
+      setFeedbackScore(normalizedScore);
+      setFeedbackStatusMessage(null);
     },
-    [feedbackReasons, submitFeedback],
+    [],
   );
 
-  const handleToggleFeedbackReason = useCallback(
-    (reason: string) => {
-      const nextReasons = feedbackReasons.includes(reason)
-        ? feedbackReasons.filter((entry) => entry !== reason)
-        : [...feedbackReasons, reason];
-      setFeedbackReasons(nextReasons);
-      if (feedbackRating) {
-        submitFeedback(feedbackRating, nextReasons);
-      }
+  const handleFeedbackCommentChange = useCallback(
+    (comment: string) => {
+      setFeedbackComment(comment);
+      setFeedbackStatusMessage(null);
     },
-    [feedbackRating, feedbackReasons, submitFeedback],
+    [],
   );
 
-  // Background pre-generation for top apps.
-  useEffect(() => {
-    if (
-      !styleConfig.isStatefulnessEnabled ||
-      activeApp?.id === SETTINGS_APP_DEFINITION.id ||
-      activeApp?.id === 'insights_app'
-    ) {
+  const handleFeedbackSubmit = useCallback(() => {
+    if (!latestEpisodeId) return;
+    if (feedbackScore === null) {
+      setFeedbackStatusMessage('Pick a score first.');
       return;
     }
-    const top3 = APP_DEFINITIONS_CONFIG.slice(0, 3);
-    const fastConfig: StyleConfig = { ...styleConfig, speedMode: 'fast' };
 
-    top3.forEach((app) => {
-      const cacheKey = getCacheKey([app.id]);
-      if (appContentCache[cacheKey]) return;
+    submitFeedback(
+      mapScoreToEpisodeRating(feedbackScore),
+      feedbackComment.trim() ? [feedbackComment.trim()] : [],
+    );
+    setFeedbackStatusMessage('Feedback saved.');
+  }, [feedbackComment, feedbackScore, latestEpisodeId, submitFeedback]);
 
-      const interaction: InteractionData = {
-        id: app.id,
-        type: 'app_open',
-        elementText: app.name,
-        elementType: 'icon',
-        appContext: app.id,
-        source: 'host',
-      };
-
-      (async () => {
-        let content = '';
-        try {
-          const selectedSkills = retrieveSkills([interaction], 3);
-          const pregenViewport = getTurnViewportContext();
-          const stream = streamAppContent(
-            [interaction],
-            fastConfig,
-            llmConfig,
-            sessionId,
-            selectedSkills,
-            pregenViewport,
-          );
-          for await (const chunk of stream) {
-            content += chunk;
-          }
-          if (content) {
-            setAppContentCache((prev) => ({ ...prev, [cacheKey]: content }));
-          }
-        } catch {
-          // Silent pre-generation failure.
-        }
-      })();
-    });
-  }, [
-    styleConfig.isStatefulnessEnabled,
-    styleConfig.detailLevel,
-    styleConfig.colorTheme,
-    styleConfig.speedMode,
-    llmConfig,
-    sessionId,
-    getTurnViewportContext,
-    activeApp?.id,
-  ]);
+  const handleClearDebugRecords = useCallback(() => {
+    setDebugRecords([]);
+  }, []);
 
   const activeAppIcon = activeApp
-    ? [DESKTOP_APP_DEFINITION, ...APP_DEFINITIONS_CONFIG, SETTINGS_APP_DEFINITION].find(
+    ? [DESKTOP_APP_DEFINITION, ...APP_DEFINITIONS_CONFIG, SETTINGS_APP_DEFINITION, ONBOARDING_APP_DEFINITION].find(
         (app) => app.id === activeApp.id,
       )?.icon
     : undefined;
 
-  const windowTitle = activeApp ? activeApp.name : DESKTOP_APP_DEFINITION.name;
+  const modelWindowTitle = useMemo(() => extractWindowTitleFromGeneratedHtml(llmContent), [llmContent]);
+  const windowTitle = modelWindowTitle || (activeApp ? activeApp.name : DESKTOP_APP_DEFINITION.name);
   const feedbackAvailable =
     !isLoading &&
     !isHostRenderedApp(activeApp?.id) &&
@@ -849,7 +1136,23 @@ const App: React.FC = () => {
     Boolean(llmContent);
 
   return (
-    <div className="w-screen h-screen overflow-hidden" style={{ background: getHostBackground(styleConfig.colorTheme) }}>
+    <div className="w-screen h-screen overflow-hidden relative" style={{ background: getHostBackground(styleConfig.colorTheme) }}>
+      <div className="absolute top-2 right-3 z-[120] pointer-events-none">
+        <div className="rounded-md border border-slate-600/70 bg-slate-900/80 text-slate-100 px-2 py-1 text-[10px] leading-tight shadow-sm backdrop-blur-sm">
+          {styleConfig.contextMemoryMode !== 'compacted' ? (
+            <div>Ctx: legacy mode</div>
+          ) : contextMemoryDebug ? (
+            <>
+              <div className="font-semibold">{`Ctx ${contextMemoryDebug.fillPercent.toFixed(1)}%`}</div>
+              <div>{`${formatTokenCount(contextMemoryDebug.tokens)} / ${formatTokenCount(contextMemoryDebug.contextWindow)} tk`}</div>
+              <div>{`thr ${formatTokenCount(contextMemoryDebug.threshold)} | turns ${contextMemoryDebug.recentTurnCount}`}</div>
+              <div>{`sum ${formatTokenCount(contextMemoryDebug.summaryLength)} ch${contextMemoryDebug.compactionInFlight ? ' | compacting' : contextMemoryDebug.compactionQueued ? ' | queued' : ''}`}</div>
+            </>
+          ) : (
+            <div>{`Ctx: waiting${contextMemoryDebugError ? ` (${contextMemoryDebugError})` : ''}`}</div>
+          )}
+        </div>
+      </div>
       <Window
         title={windowTitle}
         onClose={handleCloseAppView}
@@ -858,14 +1161,21 @@ const App: React.FC = () => {
         styleConfig={styleConfig}
         onStyleConfigChange={handleStyleConfigChange}
         onOpenSettings={handleOpenSettings}
+        debugRecords={debugRecords}
+        generationTimelineFrames={generationTimelineFrames}
+        contextMemoryDebug={contextMemoryDebug}
+        contextMemoryDebugError={contextMemoryDebugError}
+        onClearDebugRecords={handleClearDebugRecords}
         onExitToDesktop={handleCloseAppView}
         onGlobalPrompt={handleGlobalPrompt}
         feedbackAvailable={feedbackAvailable}
         feedbackFailureContext={feedbackFailureContext}
-        feedbackRating={feedbackRating}
-        feedbackReasons={feedbackReasons}
-        onFeedbackRate={handleFeedbackRate}
-        onToggleFeedbackReason={handleToggleFeedbackReason}
+        feedbackScore={feedbackScore}
+        feedbackComment={feedbackComment}
+        feedbackStatusMessage={feedbackStatusMessage}
+        onFeedbackScoreSelect={handleFeedbackScoreSelect}
+        onFeedbackCommentChange={handleFeedbackCommentChange}
+        onFeedbackSubmit={handleFeedbackSubmit}
       >
         <div ref={contentViewportRef} className="w-full h-full relative">
           {error && <div className="p-4 text-red-600 bg-red-100 rounded-md">{error}</div>}
@@ -890,9 +1200,11 @@ const App: React.FC = () => {
               onInteract={handleInteraction}
               appContext={activeApp?.id || 'desktop_env'}
               isLoading={isLoading}
+              generationTimelineFrames={generationTimelineFrames}
               appName={activeApp?.name}
               appIcon={activeAppIcon}
               colorTheme={styleConfig.colorTheme}
+              loadingUiMode={styleConfig.loadingUiMode}
               traceId={activeTraceId}
               uiSessionId={activeUiSessionId}
             />

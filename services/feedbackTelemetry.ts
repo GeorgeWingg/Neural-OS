@@ -5,12 +5,24 @@
 /* tslint:disable */
 import { EpisodeRating, FeedbackEvent } from '../types';
 
-const FEEDBACK_STORAGE_KEY = 'gemini-os-feedback-events-v1';
+const FEEDBACK_STORAGE_KEY = 'neural-computer-feedback-events-v1';
+const LEGACY_FEEDBACK_STORAGE_KEY = 'gemini-os-feedback-events-v1';
 const MAX_EVENTS = 500;
+
+function readFeedbackStorageRaw(): string | null {
+  const current = localStorage.getItem(FEEDBACK_STORAGE_KEY);
+  if (current) return current;
+  const legacy = localStorage.getItem(LEGACY_FEEDBACK_STORAGE_KEY);
+  if (legacy) {
+    localStorage.setItem(FEEDBACK_STORAGE_KEY, legacy);
+    localStorage.removeItem(LEGACY_FEEDBACK_STORAGE_KEY);
+  }
+  return legacy;
+}
 
 function readEvents(): FeedbackEvent[] {
   try {
-    const raw = localStorage.getItem(FEEDBACK_STORAGE_KEY);
+    const raw = readFeedbackStorageRaw();
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? (parsed as FeedbackEvent[]) : [];

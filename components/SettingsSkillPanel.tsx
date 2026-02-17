@@ -5,14 +5,10 @@
 /* tslint:disable */
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  ColorTheme,
   LLMConfig,
   SettingsFieldSchema,
   SettingsSkillSchema,
-  SpeedMode,
   StyleConfig,
-  UIDetailLevel,
-  ToolTier,
 } from '../types';
 
 export interface ModelCatalogEntry {
@@ -42,28 +38,35 @@ function defaultOptionsForField(
   providers: ProviderCatalogEntry[],
   currentProviderId: string,
 ): { label: string; value: string }[] {
-  if (field.options && field.options.length) return field.options;
+  if (field.key === 'loadingUiMode') {
+    const defaultLoadingModeOptions = [
+      { label: 'Code (Legacy Stream)', value: 'code' },
+      { label: 'Immersive (Live Preview + Skeleton)', value: 'immersive' },
+    ];
+    if (field.options && field.options.length) {
+      const filtered = field.options.filter(
+        (option) => option.value === 'code' || option.value === 'immersive',
+      );
+      return filtered.length ? filtered : defaultLoadingModeOptions;
+    }
+    return defaultLoadingModeOptions;
+  }
 
-  if (field.key === 'detailLevel') {
+  if (field.key === 'contextMemoryMode') {
     return [
-      { label: 'Minimal', value: 'minimal' },
-      { label: 'Standard', value: 'standard' },
-      { label: 'Rich', value: 'rich' },
+      { label: 'Compacted Memory (Recommended)', value: 'compacted' },
+      { label: 'Legacy Interaction History', value: 'legacy' },
     ];
   }
+
+  if (field.options && field.options.length) return field.options;
+
   if (field.key === 'colorTheme') {
     return [
       { label: 'System', value: 'system' },
       { label: 'Light', value: 'light' },
       { label: 'Dark', value: 'dark' },
       { label: 'Colorful', value: 'colorful' },
-    ];
-  }
-  if (field.key === 'speedMode') {
-    return [
-      { label: 'Fast', value: 'fast' },
-      { label: 'Balanced', value: 'balanced' },
-      { label: 'Quality', value: 'quality' },
     ];
   }
   if (field.key === 'toolTier') {
@@ -231,9 +234,10 @@ export const SettingsSkillPanel: React.FC<SettingsSkillPanelProps> = ({
         </div>
         <button
           onClick={onRefreshSchema}
-          className="px-3 py-1 text-xs border border-blue-700 rounded hover:bg-blue-900/20"
+          disabled={isLoading}
+          className="px-3 py-1 text-xs border border-blue-700 rounded hover:bg-blue-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          Refresh Skill Layout
+          {isLoading ? 'Refreshing...' : 'Refresh Skill Layout'}
         </button>
       </div>
 

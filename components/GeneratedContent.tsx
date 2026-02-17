@@ -4,7 +4,7 @@
  */
 /* tslint:disable */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ColorTheme, InteractionData } from '../types';
+import { ColorTheme, GenerationTimelineFrame, InteractionData, LoadingUiMode } from '../types';
 
 interface LoadingTheme {
   bg: string;
@@ -119,14 +119,51 @@ function getIframeBaseTheme(colorTheme: ColorTheme): IframeBaseTheme {
   };
 }
 
+function highlightSyntaxForTheme(escaped: string, colorTheme: ColorTheme): string {
+  if (colorTheme === 'light' || colorTheme === 'system') {
+    return escaped
+      .replace(/(\/\/.*)/g, '<span style="color:#6a737d">$1</span>')
+      .replace(/(&lt;\/?[a-zA-Z][a-zA-Z0-9-]*)/g, '<span style="color:#d73a49">$1</span>')
+      .replace(/(\/?&gt;)/g, '<span style="color:#d73a49">$1</span>')
+      .replace(
+        /\b([a-zA-Z-]+)(=)(&quot;)/g,
+        '<span style="color:#22863a">$1</span><span style="color:#444">$2</span><span style="color:#032f62">$3</span>'
+      )
+      .replace(/(&quot;[^&]*?&quot;)/g, '<span style="color:#032f62">$1</span>')
+      .replace(/\b([a-zA-Z-]+)\s*:/g, '<span style="color:#005cc5">$1</span>:')
+      .replace(
+        /\b(function|const|let|var|if|else|return|for|while|new|this|class|import|export|async|await|true|false|null|undefined|document|window)\b/g,
+        '<span style="color:#6f42c1">$1</span>'
+      )
+      .replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#005cc5">$1</span>');
+  }
+  return escaped
+    .replace(/(\/\/.*)/g, '<span style="color:#6272a4">$1</span>')
+    .replace(/(&lt;\/?[a-zA-Z][a-zA-Z0-9-]*)/g, '<span style="color:#ff79c6">$1</span>')
+    .replace(/(\/?&gt;)/g, '<span style="color:#ff79c6">$1</span>')
+    .replace(
+      /\b([a-zA-Z-]+)(=)(&quot;)/g,
+      '<span style="color:#50fa7b">$1</span><span style="color:#ccc">$2</span><span style="color:#f1fa8c">$3</span>'
+    )
+    .replace(/(&quot;[^&]*?&quot;)/g, '<span style="color:#f1fa8c">$1</span>')
+    .replace(/\b([a-zA-Z-]+)\s*:/g, '<span style="color:#8be9fd">$1</span>:')
+    .replace(
+      /\b(function|const|let|var|if|else|return|for|while|new|this|class|import|export|async|await|true|false|null|undefined|document|window)\b/g,
+      '<span style="color:#bd93f9">$1</span>'
+    )
+    .replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#bd93f9">$1</span>');
+}
+
 interface GeneratedContentProps {
   htmlContent: string;
   onInteract: (data: InteractionData) => void;
   appContext: string | null;
   isLoading: boolean;
+  generationTimelineFrames?: GenerationTimelineFrame[];
   appName?: string;
   appIcon?: string;
   colorTheme?: ColorTheme;
+  loadingUiMode?: LoadingUiMode;
   traceId?: string;
   uiSessionId?: string;
 }
@@ -206,18 +243,41 @@ function stripScriptsForPreview(markup: string): string {
   return withoutClosedScripts.replace(/<script[\s\S]*$/gi, '');
 }
 
+function parseStreamedContent(streamedContent: string): { contentWithoutThoughts: string; reasoning: string; code: string } {
+  const thoughtRegex = /<!--THOUGHT-->([\s\S]*?)<!--\/THOUGHT-->/g;
+  let reasoning = '';
+  let match;
+  while ((match = thoughtRegex.exec(streamedContent)) !== null) {
+    reasoning += match[1];
+  }
+
+  const contentWithoutThoughts = streamedContent.replace(thoughtRegex, '');
+  const firstTagIndex = contentWithoutThoughts.search(/<[a-zA-Z]/);
+  const code = firstTagIndex >= 0 ? contentWithoutThoughts.substring(firstTagIndex) : '';
+
+  if (!reasoning) {
+    reasoning = firstTagIndex > 0
+      ? contentWithoutThoughts.substring(0, firstTagIndex).trim()
+      : firstTagIndex === -1
+        ? contentWithoutThoughts.trim()
+        : '';
+  }
+
+  return { contentWithoutThoughts, reasoning, code };
+}
+
 function buildBridgeScript(uiSessionId: string, bridgeToken: string): string {
   return `
   (function() {
     var sessionId = ${JSON.stringify(uiSessionId)};
     var token = ${JSON.stringify(bridgeToken)};
-    function post(payload) {
-      window.parent.postMessage({
-        type: 'gemini-os-interaction',
-        uiSessionId: sessionId,
-        bridgeToken: token,
-        payload: payload
-      }, '*');
+	    function post(payload) {
+	      window.parent.postMessage({
+	        type: 'neural-computer-interaction',
+	        uiSessionId: sessionId,
+	        bridgeToken: token,
+	        payload: payload
+	      }, '*');
     }
     try {
       post({ type: 'bridge_ready' });
@@ -263,6 +323,10 @@ const CSS_KEYFRAMES = `
   from { opacity: 0; }
   to { opacity: 1; }
 }
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
 `;
 
 export const GeneratedContent: React.FC<GeneratedContentProps> = ({
@@ -270,31 +334,72 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
   onInteract,
   appContext,
   isLoading,
+  generationTimelineFrames = [],
   appName,
   appIcon,
   colorTheme: rawColorTheme = 'dark',
+  loadingUiMode: rawLoadingUiMode = 'code',
   traceId,
   uiSessionId = 'session_unknown',
 }) => {
   const [displayProgress, setDisplayProgress] = useState(0);
-  const [smoothProgress, setSmoothProgress] = useState(0);
   const [showIframe, setShowIframe] = useState(false);
+  const [timelineScrubIndex, setTimelineScrubIndex] = useState(0);
+  const [timelinePinnedToLive, setTimelinePinnedToLive] = useState(true);
   const [bridgeToken, setBridgeToken] = useState(() => `bridge_${Math.random().toString(36).slice(2)}`);
   const ambientRef = useRef(0);
   const scrollAnchorRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const streamingIframeRef = useRef<HTMLIFrameElement>(null);
   const eventSeqRef = useRef(0);
+  const prevDisplayProgressRef = useRef(0);
 
   const effectiveColorTheme = rawColorTheme as ColorTheme;
+  const loadingUiMode = rawLoadingUiMode === 'immersive' ? 'immersive' : 'code';
   const theme = getLoadingTheme(effectiveColorTheme);
+  const timelineFrameCount = generationTimelineFrames.length;
+  const timelineMaxIndex = Math.max(0, timelineFrameCount - 1);
+  const safeTimelineIndex = Math.min(Math.max(timelineScrubIndex, 0), timelineMaxIndex);
+  const selectedTimelineFrame = timelineFrameCount ? generationTimelineFrames[safeTimelineIndex] : null;
+  const replayActive = Boolean(selectedTimelineFrame) && safeTimelineIndex < timelineMaxIndex;
+  const activeHtmlContent = replayActive && selectedTimelineFrame ? selectedTimelineFrame.htmlSnapshot : htmlContent;
   const rawProgress = estimateProgress(htmlContent, isLoading);
+  const liveProgressBarFillPercent = !isLoading && timelineFrameCount > 0 ? 100 : displayProgress;
+  const timelineDotPercent = timelineFrameCount > 1
+    ? (safeTimelineIndex / Math.max(1, timelineMaxIndex)) * 100
+    : liveProgressBarFillPercent;
+  const timelineDotInsetPx = 5;
+  const timelineDotLeft = `clamp(${timelineDotInsetPx}px, ${timelineDotPercent}%, calc(100% - ${timelineDotInsetPx}px))`;
+  const showTimelineScrubber = !isLoading && Boolean(htmlContent) && timelineFrameCount > 1;
+  const progressBarFillWidth = showTimelineScrubber
+    ? safeTimelineIndex <= 0
+      ? `${timelineDotInsetPx}px`
+      : safeTimelineIndex >= timelineMaxIndex
+        ? `calc(100% - ${timelineDotInsetPx}px)`
+        : `${timelineDotPercent}%`
+    : `${liveProgressBarFillPercent}%`;
+  const showCompletedIframe = showIframe && !isLoading && Boolean(htmlContent) && !replayActive;
+  const [isTimelineDragging, setIsTimelineDragging] = useState(false);
+
+  useEffect(() => {
+    if (!timelineFrameCount) {
+      setTimelineScrubIndex(0);
+      setTimelinePinnedToLive(true);
+      return;
+    }
+    if (isLoading || timelinePinnedToLive) {
+      setTimelineScrubIndex(timelineMaxIndex);
+      return;
+    }
+    setTimelineScrubIndex((previous) => Math.min(previous, timelineMaxIndex));
+  }, [isLoading, timelineFrameCount, timelineMaxIndex, timelinePinnedToLive]);
 
   // Reset state when appContext changes (new app opened)
   useEffect(() => {
     setDisplayProgress(0);
-    setSmoothProgress(0);
     setShowIframe(false);
+    setTimelineScrubIndex(0);
+    setTimelinePinnedToLive(true);
     ambientRef.current = 0;
     eventSeqRef.current = 0;
     setBridgeToken(`bridge_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`);
@@ -332,20 +437,20 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
     setDisplayProgress((prev) => Math.max(prev, rawProgress));
   }, [rawProgress]);
 
-  // Smooth percentage animation via requestAnimationFrame
   useEffect(() => {
-    let raf: number;
-    const animate = () => {
-      setSmoothProgress(prev => {
-        const diff = displayProgress - prev;
-        if (Math.abs(diff) < 0.5) return displayProgress;
-        return prev + diff * 0.08;
-      });
-      raf = requestAnimationFrame(animate);
-    };
-    raf = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(raf);
+    prevDisplayProgressRef.current = displayProgress;
   }, [displayProgress]);
+
+  useEffect(() => {
+    if (!isTimelineDragging) return;
+    const endDrag = () => setIsTimelineDragging(false);
+    window.addEventListener('mouseup', endDrag);
+    window.addEventListener('touchend', endDrag);
+    return () => {
+      window.removeEventListener('mouseup', endDrag);
+      window.removeEventListener('touchend', endDrag);
+    };
+  }, [isTimelineDragging]);
 
   // Auto-scroll during streaming
   useEffect(() => {
@@ -355,10 +460,10 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
   }, [htmlContent, isLoading]);
 
   // postMessage listener for iframe interactions
-  useEffect(() => {
-    const handler = (event: MessageEvent) => {
-      if (event.data?.type !== 'gemini-os-interaction') return;
-      if (event.source !== iframeRef.current?.contentWindow) return;
+	  useEffect(() => {
+	    const handler = (event: MessageEvent) => {
+	      if (event.data?.type !== 'neural-computer-interaction' && event.data?.type !== 'gemini-os-interaction') return;
+	      if (event.source !== iframeRef.current?.contentWindow) return;
       if (event.data?.uiSessionId !== uiSessionId) return;
       if (event.data?.bridgeToken !== bridgeToken) return;
 
@@ -384,12 +489,10 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
     return () => window.removeEventListener('message', handler);
   }, [onInteract, appContext, uiSessionId, bridgeToken, traceId]);
 
-  const contentWithoutThoughts = useMemo(
-    () => htmlContent.replace(/<!--THOUGHT-->[\s\S]*?<!--\/THOUGHT-->/g, ''),
-    [htmlContent],
+  const { contentWithoutThoughts, reasoning, code } = useMemo(
+    () => parseStreamedContent(activeHtmlContent),
+    [activeHtmlContent],
   );
-  const firstTagIndex = contentWithoutThoughts.search(/<[a-zA-Z]/);
-  const code = firstTagIndex >= 0 ? contentWithoutThoughts.substring(firstTagIndex) : '';
   const previewMarkup = useMemo(() => {
     if (!contentWithoutThoughts.trim()) return '';
     if (!/<[a-zA-Z]/.test(contentWithoutThoughts)) {
@@ -440,9 +543,22 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
   }, [previewMarkup]);
 
   useEffect(() => {
-    if (!htmlContent || showIframe) return;
+    if (loadingUiMode === 'code') return;
+    if (!activeHtmlContent || showCompletedIframe) return;
     syncStreamingPreview();
-  }, [htmlContent, showIframe, syncStreamingPreview]);
+  }, [activeHtmlContent, showCompletedIframe, syncStreamingPreview, loadingUiMode]);
+
+  const handleTimelineScrub = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      if (!showTimelineScrubber) return;
+      const nextIndex = Number(event.target.value);
+      if (!Number.isFinite(nextIndex)) return;
+      const bounded = Math.max(0, Math.min(timelineMaxIndex, Math.round(nextIndex)));
+      setTimelineScrubIndex(bounded);
+      setTimelinePinnedToLive(bounded >= timelineMaxIndex);
+    },
+    [showTimelineScrubber, timelineMaxIndex],
+  );
 
   // Build iframe srcDoc — bridge script injected BEFORE content in <head>
   const iframeDoc = useMemo(() => {
@@ -522,47 +638,19 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
 </body></html>`;
   }, [htmlContent, isLoading, uiSessionId, bridgeToken, effectiveColorTheme, contentWithoutThoughts]);
 
-  // Status text
-  const getStatusText = (): string => {
-    if (!htmlContent) return 'Connecting...';
-    if (firstTagIndex === -1) return 'Thinking...';
-    if (/<script/i.test(code) && !/<\/script>/i.test(code))
-      return 'Building interactivity...';
-    if (/<style/i.test(code) && !/<\/style>/i.test(code))
-      return 'Writing styles...';
-    if (/<\/script>/i.test(code)) return 'Finalizing...';
-    return 'Generating interface...';
-  };
-
-  // Phase 3: Complete - show iframe with crossfade
-  if (showIframe && !isLoading && htmlContent) {
-    return (
-      <div
-        style={{
-          width: '100%',
-          height: '100%',
-          animation: 'fadeIn 0.3s ease-in',
-        }}
-      >
-        <style>{CSS_KEYFRAMES}</style>
-        <iframe
-          ref={iframeRef}
-          srcDoc={iframeDoc}
-          style={{ width: '100%', height: '100%', border: 'none' }}
-          sandbox="allow-scripts allow-forms"
-          title={appName || 'App Content'}
-          referrerPolicy="no-referrer"
-        />
-      </div>
-    );
-  }
-
   // No content and not loading
-  if (!isLoading && !htmlContent) {
+  if (!isLoading && !htmlContent && timelineFrameCount === 0) {
     return null;
   }
 
   const isGradientBg = effectiveColorTheme === 'colorful';
+  const cursorColor = effectiveColorTheme === 'light' || effectiveColorTheme === 'system' ? '#3b82f6' : '#89b4fa';
+  const progressTransition =
+    showTimelineScrubber
+      ? 'none'
+      : displayProgress < prevDisplayProgressRef.current
+      ? 'none'
+      : 'width 1.5s cubic-bezier(0.4, 0, 0.2, 1)';
   // Phase 1 & 2: Loading / Streaming view
   return (
     <div
@@ -571,6 +659,8 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
+        position: 'relative',
+        overflow: 'visible',
         ...(isGradientBg ? { background: theme.bg } : { background: theme.bg }),
         color: theme.text,
         fontFamily:
@@ -580,16 +670,68 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
       <style>{CSS_KEYFRAMES}</style>
 
       {/* Progress bar */}
-      <div style={{ height: '3px', background: theme.progressBg, flexShrink: 0 }}>
+      <div
+        style={{
+          height: '3px',
+          background: theme.progressBg,
+          flexShrink: 0,
+          position: 'relative',
+          overflow: 'visible',
+          zIndex: 6,
+        }}
+      >
         <div
           style={{
-            height: '100%',
-            width: `${displayProgress}%`,
+            height: '3px',
+            width: progressBarFillWidth,
             background: theme.progressFill,
-            transition: 'width 1.5s cubic-bezier(0.4, 0, 0.2, 1)',
+            transition: progressTransition,
             borderRadius: '0 2px 2px 0',
           }}
         />
+        {showTimelineScrubber && (
+          <>
+            <input
+              type="range"
+              min={0}
+              max={timelineMaxIndex}
+              value={safeTimelineIndex}
+              onChange={handleTimelineScrub}
+              onMouseDown={() => setIsTimelineDragging(true)}
+              onTouchStart={() => setIsTimelineDragging(true)}
+              onBlur={() => setIsTimelineDragging(false)}
+              aria-label="Generation timeline scrubber"
+              style={{
+                position: 'absolute',
+                top: '-10px',
+                left: 0,
+                right: 0,
+                height: '23px',
+                opacity: 0,
+                cursor: isTimelineDragging ? 'grabbing' : 'grab',
+              }}
+            />
+            <div
+              style={{
+                position: 'absolute',
+                top: '50%',
+                left: timelineDotLeft,
+                transform: 'translate(-50%, -50%)',
+                width: '8px',
+                height: '8px',
+                borderRadius: '999px',
+                background: '#3b82f6',
+                border: '1px solid rgba(255,255,255,0.85)',
+                boxShadow: isTimelineDragging
+                  ? '0 0 0 2px rgba(59,130,246,0.34)'
+                  : '0 0 0 1px rgba(59,130,246,0.28)',
+                transition: 'box-shadow 120ms ease',
+                pointerEvents: 'none',
+                zIndex: 7,
+              }}
+            />
+          </>
+        )}
       </div>
 
       {/* Content area */}
@@ -601,7 +743,24 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
           lineHeight: '1.6',
         }}
       >
-        {!htmlContent ? (
+        {showCompletedIframe ? (
+          <div
+            style={{
+              width: '100%',
+              height: '100%',
+              animation: 'fadeIn 0.3s ease-in',
+            }}
+          >
+            <iframe
+              ref={iframeRef}
+              srcDoc={iframeDoc}
+              style={{ width: '100%', height: '100%', border: 'none' }}
+              sandbox="allow-scripts allow-forms"
+              title={appName || 'App Content'}
+              referrerPolicy="no-referrer"
+            />
+          </div>
+        ) : !activeHtmlContent ? (
           /* Phase 1: Initial loading - centered icon + skeleton */
           <div
             style={{
@@ -622,7 +781,7 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
                   "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
               }}
             >
-              Connecting...
+              {timelineFrameCount > 0 && !isLoading ? 'Start of generation' : 'Connecting...'}
             </div>
             <div
               style={{
@@ -651,51 +810,91 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
           </div>
         ) : (
           /* Phase 2: Streaming content */
-          <>
-            <div style={{ height: '100%', padding: '10px' }}>
-              <div
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  borderRadius: '10px',
-                  overflow: 'hidden',
-                  border: `1px solid ${theme.statusBorder}`,
-                  background: effectiveColorTheme === 'light' || effectiveColorTheme === 'system'
-                    ? 'rgba(255, 255, 255, 0.75)'
-                    : 'rgba(15, 23, 42, 0.28)',
-                }}
-              >
-                <iframe
-                  ref={streamingIframeRef}
-                  srcDoc={streamingPreviewDoc}
-                  onLoad={syncStreamingPreview}
-                  style={{ width: '100%', height: '100%', border: 'none', pointerEvents: 'none' }}
-                  sandbox="allow-forms allow-same-origin"
-                  title={`${appName || 'App Content'} Streaming Preview`}
-                  referrerPolicy="no-referrer"
-                />
-              </div>
+          loadingUiMode === 'code' ? (
+            <div style={{ padding: '14px 16px 18px' }}>
+              {reasoning && (
+                <div style={{ marginBottom: code ? '16px' : 0 }}>
+                  <div
+                    style={{
+                      fontSize: '11px',
+                      color: theme.statusText,
+                      marginBottom: '8px',
+                      textTransform: 'uppercase',
+                      letterSpacing: '1px',
+                    }}
+                  >
+                    Reasoning
+                  </div>
+                  <div
+                    dangerouslySetInnerHTML={{
+                      __html:
+                        escapeHtml(reasoning) +
+                        (isLoading && !replayActive && !code
+                          ? `<span style="animation:blink 1s infinite;color:${cursorColor}">&#9610;</span>`
+                          : ''),
+                    }}
+                    style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+                  />
+                </div>
+              )}
+              {code && (
+                <div>
+                  <div
+                    style={{
+                      fontSize: '11px',
+                      color: theme.statusText,
+                      marginBottom: '8px',
+                      textTransform: 'uppercase',
+                      letterSpacing: '1px',
+                    }}
+                  >
+                    Generated Code
+                  </div>
+                  <div
+                    dangerouslySetInnerHTML={{
+                      __html:
+                        highlightSyntaxForTheme(escapeHtml(code), effectiveColorTheme) +
+                        (isLoading && !replayActive
+                          ? `<span style="animation:blink 1s infinite;color:${cursorColor}">&#9610;</span>`
+                          : ''),
+                    }}
+                    style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+                  />
+                </div>
+              )}
+              <div ref={scrollAnchorRef} />
             </div>
-            {/* Scroll anchor */}
-            <div ref={scrollAnchorRef} />
-          </>
+          ) : (
+            <>
+              <div style={{ height: '100%', padding: '10px' }}>
+                <div
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    borderRadius: '10px',
+                    overflow: 'hidden',
+                    border: `1px solid ${theme.statusBorder}`,
+                    background: effectiveColorTheme === 'light' || effectiveColorTheme === 'system'
+                      ? 'rgba(255, 255, 255, 0.75)'
+                      : 'rgba(15, 23, 42, 0.28)',
+                  }}
+                >
+                  <iframe
+                    ref={streamingIframeRef}
+                    srcDoc={streamingPreviewDoc}
+                    onLoad={syncStreamingPreview}
+                    style={{ width: '100%', height: '100%', border: 'none', pointerEvents: 'none' }}
+                    sandbox="allow-forms allow-same-origin"
+                    title={`${appName || 'App Content'} Streaming Preview`}
+                    referrerPolicy="no-referrer"
+                  />
+                </div>
+              </div>
+              {/* Scroll anchor */}
+              <div ref={scrollAnchorRef} />
+            </>
+          )
         )}
-      </div>
-
-      {/* Status bar */}
-      <div
-        style={{
-          padding: '6px 16px',
-          borderTop: `1px solid ${theme.statusBorder}`,
-          fontSize: '11px',
-          color: theme.statusText,
-          display: 'flex',
-          justifyContent: 'space-between',
-          flexShrink: 0,
-        }}
-      >
-        <span>{getStatusText()}</span>
-        <span>{Math.round(smoothProgress)}%</span>
       </div>
     </div>
   );

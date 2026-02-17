@@ -5,7 +5,8 @@
 /* tslint:disable */
 import { APP_DEFINITIONS_CONFIG, DEFAULT_SYSTEM_PROMPT, SETTINGS_APP_DEFINITION, getSystemPrompt } from '../constants';
 import {
-  AppSkill,
+  ContextMemoryMode,
+  DebugSkillSnapshot,
   InteractionData,
   LLMConfig,
   SettingsSkillSchema,
@@ -18,10 +19,121 @@ export interface LlmCatalogProvider {
   models: { id: string; name: string }[];
 }
 
+export interface StreamRequestDebugSnapshot {
+  createdAt: number;
+  appContext: string;
+  currentInteraction: InteractionData;
+  historyLength: number;
+  promptHistoryLength: number;
+  contextMemoryMode: ContextMemoryMode;
+  viewport: ViewportContext;
+  llmConfig: LLMConfig;
+  systemPrompt: string;
+  userMessage: string;
+  activeSkills: DebugSkillSnapshot[];
+  retryHint?: string;
+}
+
+export type StreamClientEvent =
+  | { type: 'chunk'; chunk: string }
+  | { type: 'thought'; text: string }
+  | {
+      type: 'render_output';
+      toolName?: string;
+      toolCallId?: string;
+      revision: number;
+      html: string;
+      isFinal?: boolean;
+      appContext?: string;
+      revisionNote?: string;
+    }
+  | { type: 'tool_call_start'; toolName?: string; toolCallId?: string }
+  | { type: 'tool_call_result'; toolName?: string; toolCallId?: string; isError?: boolean; text?: string }
+  | { type: 'done' }
+  | { type: 'error'; error: string };
+
+interface StreamAppContentOptions {
+  onPreparedRequest?: (snapshot: StreamRequestDebugSnapshot) => void;
+  onStreamEvent?: (event: StreamClientEvent) => void;
+}
+
+export interface ParsedServerStreamEvent {
+  clientEvent?: StreamClientEvent;
+  outputChunk: string | null;
+  errorMessage?: string;
+}
+
 interface ApiErrorDetails {
   code?: string;
   message: string;
   details?: unknown;
+}
+
+const TAURI_DEFAULT_API_ORIGIN = 'http://127.0.0.1:8787';
+
+function isTauriRuntime(): boolean {
+  if (typeof window === 'undefined') return false;
+  if (window.location.protocol === 'tauri:') return true;
+  return typeof navigator !== 'undefined' && navigator.userAgent.includes('Tauri');
+}
+
+function resolveApiOrigin(): string {
+  const envOrigin =
+    (import.meta as any)?.env?.VITE_NEURAL_COMPUTER_API_ORIGIN ||
+    (import.meta as any)?.env?.VITE_GEMINI_OS_API_ORIGIN;
+  if (typeof envOrigin === 'string' && envOrigin.trim().length > 0) {
+    return envOrigin.trim().replace(/\/+$/, '');
+  }
+  if (isTauriRuntime()) {
+    return TAURI_DEFAULT_API_ORIGIN;
+  }
+  return '';
+}
+
+const API_ORIGIN = resolveApiOrigin();
+const STREAM_FETCH_RETRY_DELAYS_MS = [250, 700];
+
+function apiUrl(path: string): string {
+  if (!API_ORIGIN) return path;
+  return `${API_ORIGIN}${path}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStreamFetchError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message || '';
+  if (error.name === 'TypeError') return true;
+  return (
+    /failed to fetch/i.test(message) ||
+    /networkerror/i.test(message) ||
+    /connection/i.test(message) ||
+    /err_connection/i.test(message)
+  );
+}
+
+async function fetchStreamResponseWithRetry(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
+  const maxAttempts = STREAM_FETCH_RETRY_DELAYS_MS.length + 1;
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(input, init);
+      if (response.status >= 500 && attempt + 1 < maxAttempts) {
+        await sleep(STREAM_FETCH_RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableStreamFetchError(error) || attempt + 1 >= maxAttempts) {
+        throw error;
+      }
+      await sleep(STREAM_FETCH_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Failed to fetch stream response.');
 }
 
 async function parseApiError(response: Response): Promise<ApiErrorDetails> {
@@ -63,7 +175,7 @@ function formatApiErrorForThrow(apiError: ApiErrorDetails): string {
 
 const fallbackSettingsSchema: SettingsSkillSchema = {
   version: '1.0.0',
-  title: 'Gemini OS Settings',
+  title: 'Neural Computer Settings',
   description: 'Fallback schema while settings skill is unavailable.',
   generatedBy: 'fallback_settings_skill',
   sections: [
@@ -71,12 +183,8 @@ const fallbackSettingsSchema: SettingsSkillSchema = {
       id: 'experience',
       title: 'Experience',
       fields: [
-        { key: 'detailLevel', label: 'Detail Level', control: 'select' },
         { key: 'colorTheme', label: 'Color Theme', control: 'select' },
-        { key: 'speedMode', label: 'Speed Mode', control: 'select' },
         { key: 'enableAnimations', label: 'Enable Animations', control: 'toggle' },
-        { key: 'maxHistoryLength', label: 'History Length', control: 'number', min: 0, max: 10 },
-        { key: 'isStatefulnessEnabled', label: 'Statefulness', control: 'toggle' },
         { key: 'qualityAutoRetryEnabled', label: 'Auto Retry On Low Quality', control: 'toggle' },
       ],
     },
@@ -93,6 +201,14 @@ const fallbackSettingsSchema: SettingsSkillSchema = {
       id: 'advanced',
       title: 'Advanced',
       fields: [
+        { key: 'loadingUiMode', label: 'Loading UI Mode', control: 'select' },
+        { key: 'contextMemoryMode', label: 'Context Memory Mode', control: 'select' },
+        {
+          key: 'workspaceRoot',
+          label: 'Workspace Root',
+          description: 'Workspace path used by Pi-style coding tools. Must be allowed by server policy.',
+          control: 'text',
+        },
         { key: 'googleSearchApiKey', label: 'Google Search API Key', control: 'password' },
         { key: 'googleSearchCx', label: 'Google Search CX', control: 'text' },
         { key: 'customSystemPrompt', label: 'Custom System Prompt', control: 'textarea' },
@@ -101,8 +217,56 @@ const fallbackSettingsSchema: SettingsSkillSchema = {
   ],
 };
 
+function ensureRuntimeModeFields(schema: SettingsSkillSchema): SettingsSkillSchema {
+  const sections = Array.isArray(schema.sections)
+    ? schema.sections.map((section) => ({
+        ...section,
+        fields: Array.isArray(section.fields) ? [...section.fields] : [],
+      }))
+    : [];
+
+  let advancedSection = sections.find((section) => section.id === 'advanced');
+  if (!advancedSection) {
+    advancedSection = { id: 'advanced', title: 'Advanced', fields: [] };
+    sections.push(advancedSection);
+  }
+
+  const hasLoadingUiMode = advancedSection.fields.some((field) => field.key === 'loadingUiMode');
+  if (!hasLoadingUiMode) {
+    advancedSection.fields.unshift({
+      key: 'loadingUiMode',
+      label: 'Loading UI Mode',
+      description: 'Default is Code (Legacy Stream). Switch to Immersive live preview if preferred.',
+      control: 'select',
+    });
+  }
+
+  const hasContextMemoryMode = advancedSection.fields.some((field) => field.key === 'contextMemoryMode');
+  if (!hasContextMemoryMode) {
+    advancedSection.fields.push({
+      key: 'contextMemoryMode',
+      label: 'Context Memory Mode',
+      description: 'Compacted mode uses server-side memory with token-aware compaction. Legacy mode uses client interaction history.',
+      control: 'select',
+    });
+  }
+
+  const hasWorkspaceRoot = advancedSection.fields.some((field) => field.key === 'workspaceRoot');
+  if (!hasWorkspaceRoot) {
+    advancedSection.fields.push({
+      key: 'workspaceRoot',
+      label: 'Workspace Root',
+      description: 'Workspace path used by Pi-style coding tools. Must be allowed by server policy.',
+      control: 'text',
+      placeholder: './workspace',
+    });
+  }
+
+  return { ...schema, sections };
+}
+
 export async function fetchLlmCatalog(): Promise<LlmCatalogProvider[]> {
-  const response = await fetch('/api/llm/catalog');
+  const response = await fetch(apiUrl('/api/llm/catalog'));
   if (!response.ok) {
     const apiError = await parseApiError(response);
     throw new Error(`Failed to load model catalog: ${formatApiErrorForThrow(apiError)}`);
@@ -112,7 +276,7 @@ export async function fetchLlmCatalog(): Promise<LlmCatalogProvider[]> {
 }
 
 export async function saveProviderCredential(sessionId: string, providerId: string, apiKey: string): Promise<void> {
-  const response = await fetch('/api/credentials/set', {
+  const response = await fetch(apiUrl('/api/credentials/set'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId, providerId, apiKey }),
@@ -128,7 +292,7 @@ export async function generateSettingsSchema(
   styleConfig: StyleConfig,
   llmConfig: LLMConfig,
 ): Promise<SettingsSkillSchema> {
-  const response = await fetch('/api/settings/schema', {
+  const response = await fetch(apiUrl('/api/settings/schema'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId, styleConfig, llmConfig }),
@@ -141,15 +305,15 @@ export async function generateSettingsSchema(
 
   const payload = await response.json();
   if (payload && payload.schema && Array.isArray(payload.schema.sections)) {
-    return payload.schema as SettingsSkillSchema;
+    return ensureRuntimeModeFields(payload.schema as SettingsSkillSchema);
   }
-  return fallbackSettingsSchema;
+  return ensureRuntimeModeFields(fallbackSettingsSchema);
 }
 
 function buildUserMessage(
   interactionHistory: InteractionData[],
-  styleConfig: StyleConfig,
   viewportContext: ViewportContext,
+  contextMemoryMode: ContextMemoryMode,
   retryHint?: string,
 ): string {
   const currentInteraction = interactionHistory[0];
@@ -177,10 +341,8 @@ function buildUserMessage(
     : 'No specific app context for current interaction.';
 
   let historyPromptSegment = '';
-  if (pastInteractions.length > 0) {
-    const numPrevInteractionsToMention =
-      styleConfig.maxHistoryLength - 1 > 0 ? styleConfig.maxHistoryLength - 1 : 0;
-    historyPromptSegment = `\n\nPrevious User Interactions (up to ${numPrevInteractionsToMention} most recent, oldest first in this list segment):`;
+  if (contextMemoryMode === 'legacy' && pastInteractions.length > 0) {
+    historyPromptSegment = '\n\nPrevious User Interactions (all prior turns, oldest first in this list segment):';
 
     pastInteractions.forEach((interaction, index) => {
       const pastElementName = interaction.elementText || interaction.id || 'Unknown Element';
@@ -192,6 +354,10 @@ function buildUserMessage(
       }
       historyPromptSegment += '.';
     });
+  }
+  if (contextMemoryMode === 'compacted') {
+    historyPromptSegment =
+      '\n\nServer Context Memory Mode: compacted. Prior turns are provided by server-side rolling memory and compaction.';
   }
 
   const appContext = currentInteraction.appContext || 'desktop_env';
@@ -239,7 +405,7 @@ ${appLayoutPolicy}
 Full Context for Current Interaction (for your reference, primarily use summaries and history):
 ${JSON.stringify(currentInteraction, null, 1)}
 
-Generate the HTML content for the window's content area only:`;
+Use the emit_screen tool to publish HTML for the window's content area only.`;
 }
 
 export async function* streamAppContent(
@@ -247,9 +413,9 @@ export async function* streamAppContent(
   styleConfig: StyleConfig,
   llmConfig: LLMConfig,
   sessionId: string,
-  activeSkills: AppSkill[] = [],
   viewportContext?: ViewportContext,
   retryHint?: string,
+  options?: StreamAppContentOptions,
 ): AsyncGenerator<string, void, void> {
   if (!interactionHistory.length) {
     yield `<div class="p-4 text-orange-700 bg-orange-100 rounded-lg"><p class="font-bold text-lg">No interaction data provided.</p></div>`;
@@ -259,26 +425,33 @@ export async function* streamAppContent(
   const currentInteraction = interactionHistory[0];
   const appContext = currentInteraction.appContext;
   const baseSystemPrompt = getSystemPrompt(styleConfig, appContext);
-
-  const skillPromptSegment = activeSkills.length
-    ? `\n\nSkill Context (retrieved runtime skills, highest priority first):\n${activeSkills
-        .map((skill, index) => {
-          const mustDo = skill.instructionsDo.map((entry) => `- ${entry}`).join('\n');
-          const avoid = skill.instructionsAvoid.map((entry) => `- ${entry}`).join('\n');
-          return `${index + 1}. ${skill.title}\nScope: ${skill.scope}${skill.appContext ? ` (app=${skill.appContext})` : ''}\nDo:\n${mustDo}\nAvoid:\n${avoid}`;
-        })
-        .join('\n\n')}`
-    : '';
-
-  const systemPrompt = `${baseSystemPrompt}${skillPromptSegment}`;
+  // Filesystem skills are now injected server-side as metadata and loaded on demand.
+  const systemPrompt = baseSystemPrompt;
+  const contextMemoryMode: ContextMemoryMode =
+    styleConfig.contextMemoryMode === 'legacy' ? 'legacy' : 'compacted';
   const effectiveViewport = viewportContext || {
     width: typeof window !== 'undefined' ? window.innerWidth : 1280,
     height: typeof window !== 'undefined' ? window.innerHeight : 720,
     devicePixelRatio: typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1,
   };
-  const userMessage = buildUserMessage(interactionHistory, styleConfig, effectiveViewport, retryHint);
+  const promptHistory = contextMemoryMode === 'legacy' ? interactionHistory : [currentInteraction];
+  const userMessage = buildUserMessage(promptHistory, effectiveViewport, contextMemoryMode, retryHint);
+  options?.onPreparedRequest?.({
+    createdAt: Date.now(),
+    appContext: appContext || 'desktop_env',
+    currentInteraction,
+    historyLength: interactionHistory.length,
+    promptHistoryLength: promptHistory.length,
+    contextMemoryMode,
+    viewport: effectiveViewport,
+    llmConfig,
+    systemPrompt,
+    userMessage,
+    activeSkills: [],
+    retryHint,
+  });
 
-  const response = await fetch('/api/llm/stream', {
+  const response = await fetchStreamResponseWithRetry(apiUrl('/api/llm/stream'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -286,9 +459,15 @@ export async function* streamAppContent(
       llmConfig,
       systemPrompt,
       userMessage,
-      speedMode: styleConfig.speedMode,
+      appContext: appContext || 'desktop_env',
+      currentInteraction,
+      contextMemoryMode,
       googleSearchApiKey: styleConfig.googleSearchApiKey,
       googleSearchCx: styleConfig.googleSearchCx,
+      workspaceRoot: styleConfig.workspaceRoot,
+      styleConfig: {
+        workspaceRoot: styleConfig.workspaceRoot,
+      },
     }),
   });
 
@@ -300,6 +479,90 @@ export async function* streamAppContent(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  const emitStreamEvent = (event: StreamClientEvent) => {
+    options?.onStreamEvent?.(event);
+  };
+
+  const parseServerStreamEvent = (event: any): ParsedServerStreamEvent => {
+    if (event.type === 'chunk' && typeof event.chunk === 'string') {
+      return {
+        clientEvent: { type: 'chunk', chunk: event.chunk },
+        outputChunk: event.chunk,
+      };
+    }
+    if (event.type === 'thought' && typeof event.text === 'string') {
+      return {
+        clientEvent: { type: 'thought', text: event.text },
+        outputChunk: `<!--THOUGHT-->${event.text}<!--/THOUGHT-->`,
+      };
+    }
+    if (event.type === 'render_output' && typeof event.html === 'string') {
+      const revision =
+        typeof event.revision === 'number' && Number.isFinite(event.revision) && event.revision > 0
+          ? Math.floor(event.revision)
+          : 1;
+      return {
+        clientEvent: {
+          type: 'render_output',
+          toolName: typeof event.toolName === 'string' ? event.toolName : undefined,
+          toolCallId: typeof event.toolCallId === 'string' ? event.toolCallId : undefined,
+          revision,
+          html: event.html,
+          isFinal: Boolean(event.isFinal),
+          appContext: typeof event.appContext === 'string' ? event.appContext : undefined,
+          revisionNote: typeof event.revisionNote === 'string' ? event.revisionNote : undefined,
+        },
+        outputChunk: null,
+      };
+    }
+    if (event.type === 'tool_call_start') {
+      return {
+        clientEvent: {
+          type: 'tool_call_start',
+          toolName: typeof event.toolName === 'string' ? event.toolName : undefined,
+          toolCallId: typeof event.toolCallId === 'string' ? event.toolCallId : undefined,
+        },
+        outputChunk: null,
+      };
+    }
+    if (event.type === 'tool_call_result') {
+      return {
+        clientEvent: {
+          type: 'tool_call_result',
+          toolName: typeof event.toolName === 'string' ? event.toolName : undefined,
+          toolCallId: typeof event.toolCallId === 'string' ? event.toolCallId : undefined,
+          isError: Boolean(event.isError),
+          text: typeof event.text === 'string' ? event.text : undefined,
+        },
+        outputChunk: null,
+      };
+    }
+    if (event.type === 'done') {
+      return {
+        clientEvent: { type: 'done' },
+        outputChunk: null,
+      };
+    }
+    if (event.type === 'error') {
+      return {
+        clientEvent: { type: 'error', error: String(event.error || 'Unknown runtime error.') },
+        outputChunk: null,
+        errorMessage: String(event.error || 'Unknown runtime error.'),
+      };
+    }
+    return { outputChunk: null };
+  };
+
+  const processStreamEvent = (event: any): string | null => {
+    const parsed = parseServerStreamEvent(event);
+    if (parsed.clientEvent) {
+      emitStreamEvent(parsed.clientEvent);
+    }
+    if (parsed.errorMessage) {
+      throw new Error(parsed.errorMessage);
+    }
+    return parsed.outputChunk;
+  };
 
   while (true) {
     const { value, done } = await reader.read();
@@ -320,24 +583,25 @@ export async function* streamAppContent(
         continue;
       }
 
-      if (event.type === 'chunk' && typeof event.chunk === 'string') {
-        yield event.chunk;
-      } else if (event.type === 'thought' && typeof event.text === 'string') {
-        yield `<!--THOUGHT-->${event.text}<!--/THOUGHT-->`;
-      } else if (event.type === 'error') {
-        throw new Error(String(event.error || 'Unknown runtime error.'));
+      const outputChunk = processStreamEvent(event);
+      if (typeof outputChunk === 'string') {
+        yield outputChunk;
       }
     }
   }
 
   if (buffer.trim()) {
+    let event: any;
     try {
-      const event = JSON.parse(buffer.trim());
-      if (event.type === 'error') {
-        throw new Error(String(event.error || 'Unknown runtime error.'));
-      }
+      event = JSON.parse(buffer.trim());
     } catch {
       // Ignore trailing malformed event.
+    }
+    if (event) {
+      const outputChunk = processStreamEvent(event);
+      if (typeof outputChunk === 'string') {
+        yield outputChunk;
+      }
     }
   }
 }

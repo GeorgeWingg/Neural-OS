@@ -8,7 +8,7 @@ import systemPromptText from './system_prompt.md?raw';
 
 export const DESKTOP_APP_DEFINITION: AppDefinition = {
   id: 'desktop_env',
-  name: 'Gemini Desktop',
+  name: 'Neural Desktop',
   icon: '🖥️',
   color: '#1a1a2e',
 };
@@ -33,15 +33,23 @@ export const SETTINGS_APP_DEFINITION: AppDefinition = {
   color: '#e7f3ff',
 };
 
+export const ONBOARDING_APP_DEFINITION: AppDefinition = {
+  id: 'onboarding_app',
+  name: 'Onboarding',
+  icon: 'START',
+  color: '#e8f5e9',
+};
+
+export const DEFAULT_WORKSPACE_ROOT = './workspace';
+
 export const DEFAULT_STYLE_CONFIG: StyleConfig = {
-  detailLevel: 'standard',
   colorTheme: 'system',
-  speedMode: 'balanced',
+  loadingUiMode: 'code',
+  contextMemoryMode: 'compacted',
   enableAnimations: true,
-  maxHistoryLength: 3,
-  isStatefulnessEnabled: true, // Default to true for better desktop experience
   qualityAutoRetryEnabled: true,
   customSystemPrompt: '',
+  workspaceRoot: DEFAULT_WORKSPACE_ROOT,
 };
 
 export const DEFAULT_LLM_CONFIG: LLMConfig = {
@@ -51,14 +59,13 @@ export const DEFAULT_LLM_CONFIG: LLMConfig = {
 };
 
 export const SETTINGS_SKILL_ALLOWED_FIELD_KEYS = [
-  'detailLevel',
   'colorTheme',
-  'speedMode',
+  'loadingUiMode',
+  'contextMemoryMode',
   'enableAnimations',
-  'maxHistoryLength',
-  'isStatefulnessEnabled',
   'qualityAutoRetryEnabled',
   'customSystemPrompt',
+  'workspaceRoot',
   'googleSearchApiKey',
   'googleSearchCx',
   'providerId',
@@ -70,10 +77,12 @@ export const DEFAULT_SYSTEM_PROMPT = systemPromptText;
 
 export const MANDATORY_OUTPUT_RULES = `
 **CRITICAL TECHNICAL REQUIREMENTS:**
-- Return ONLY raw HTML content. No markdown fences, no \`<html>\` or \`<body>\` wrappers.
+- Publish user-visible UI through the \`emit_screen\` tool. Do not rely on plain text output for final rendering.
+- The \`emit_screen.html\` field must contain raw HTML content only. No markdown fences, no \`<html>\` or \`<body>\` wrappers.
 - You CAN and SHOULD use \`<style>\` tags for app-specific CSS.
 - You CAN and SHOULD use \`<script>\` tags for interactive apps.
-- Do NOT generate a main heading/title — the window frame provides that.
+- Do NOT generate a main heading/title solely for window labeling — the window frame provides that.
+- Include a metadata marker near the top of output: \`<!--WINDOW_TITLE: Short Screen Name-->\` (1-4 words).
 - Use \`data-interaction-id\` on elements that should trigger navigation/actions.
 - Avoid emoji-first iconography unless explicitly requested by the user.
 `;
@@ -84,15 +93,9 @@ export const getSystemPrompt = (styleConfig: StyleConfig, appContext?: string | 
     return `${styleConfig.customSystemPrompt}\n\n${MANDATORY_OUTPUT_RULES}`;
   }
 
-  const { detailLevel, colorTheme, maxHistoryLength } = styleConfig;
+  const { colorTheme } = styleConfig;
 
   let directives = '';
-
-  if (detailLevel === 'rich') {
-    directives += `\n- **Rich UI Mode:** Generate production-quality, multi-section layouts with detailed content, rich descriptions, visual hierarchy, icons, and decorative elements.`;
-  } else if (detailLevel === 'minimal') {
-    directives += `\n- **Minimal UI Mode:** Generate clean, essential elements only. Minimal text, fewer interactive elements, sparse and efficient layouts.`;
-  }
 
   if (colorTheme === 'dark') {
     directives += `\n- **Dark Theme:** Use dark backgrounds (#1e1e1e, #2d2d2d) and light text (#e0e0e0) throughout. Apply via a <style> tag on body and all elements.`;
@@ -143,10 +146,19 @@ Generate a high-fidelity, immersive media gallery.
 2. **Content:** The gallery showcases photos and images. Use placeholder images from placehold.co or unsplash.
 3. **Tools:** Include a "Slide Show" mode and "Download" interactions.
 4. **Search:** Allow the user to filter by categories (e.g., "Nature," "Architecture," "People").`;
+  } else if (appContext === 'onboarding_app') {
+    contextInstructions = `
+
+**CRITICAL — ONBOARDING APP INSTRUCTIONS:**
+You are guiding first-run setup.
+1. Use tools/actions to complete onboarding checkpoints before attempting completion.
+2. Keep screens concise and action-driven.
+3. Use explicit \`data-interaction-id\` targets for each onboarding action.
+4. Do not claim completion unless the host confirms it.`;
   }
 
   return `${DEFAULT_SYSTEM_PROMPT}
 ${directives}${contextInstructions}
 
-**Interaction History:** You will receive the last ${maxHistoryLength} user interactions for context. Most recent is listed first.`;
+**Interaction Memory:** Preserve continuity across turns using the memory context provided with each request.`;
 };
