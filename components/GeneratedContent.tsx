@@ -378,7 +378,7 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
         ? `calc(100% - ${timelineDotInsetPx}px)`
         : `${timelineDotPercent}%`
     : `${liveProgressBarFillPercent}%`;
-  const showCompletedIframe = showIframe && !isLoading && Boolean(htmlContent) && !replayActive;
+  const showCompletedIframe = showIframe && Boolean(htmlContent) && !replayActive;
   const [isTimelineDragging, setIsTimelineDragging] = useState(false);
 
   useEffect(() => {
@@ -397,7 +397,6 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
   // Reset state when appContext changes (new app opened)
   useEffect(() => {
     setDisplayProgress(0);
-    setShowIframe(false);
     setTimelineScrubIndex(0);
     setTimelinePinnedToLive(true);
     ambientRef.current = 0;
@@ -407,9 +406,11 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
 
   // Handle completion: crossfade to iframe
   useEffect(() => {
-    if (!isLoading && htmlContent) {
-      setDisplayProgress(100);
-      const timer = setTimeout(() => setShowIframe(true), 300);
+    if (htmlContent) {
+      if (!isLoading) {
+        setDisplayProgress(100);
+      }
+      const timer = setTimeout(() => setShowIframe(true), isLoading ? 0 : 300);
       return () => clearTimeout(timer);
     }
     if (!htmlContent) {
@@ -562,7 +563,7 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
 
   // Build iframe srcDoc — bridge script injected BEFORE content in <head>
   const iframeDoc = useMemo(() => {
-    if (!htmlContent || isLoading) return '';
+    if (!htmlContent) return '';
     const iframeTheme = getIframeBaseTheme(effectiveColorTheme);
     // Check if the content has any HTML tags
     const hasHtml = /<[a-zA-Z]/.test(contentWithoutThoughts);

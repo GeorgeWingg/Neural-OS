@@ -675,7 +675,6 @@ const App: React.FC = () => {
       let retryAttempted = false;
       let fallbackShown = false;
 
-      setLlmContent('');
       const firstAttempt = await runAttempt();
       if (firstAttempt.aborted || signal.aborted) return;
       finalContent = firstAttempt.content;
@@ -697,7 +696,6 @@ const App: React.FC = () => {
           detail: truncateText(qualityResult.correctiveHint, 220),
           htmlSnapshot: '',
         });
-        setLlmContent('');
         const secondAttempt = await runAttempt(qualityResult.correctiveHint);
         if (secondAttempt.aborted || signal.aborted) return;
         finalContent = secondAttempt.content;
@@ -946,7 +944,6 @@ const App: React.FC = () => {
       setInteractionHistory(newHistory);
 
       setActiveApp(app);
-      setLlmContent('');
       setGenerationTimelineFrames([]);
       setError(null);
       setLatestEpisodeId(null);
@@ -995,7 +992,6 @@ const App: React.FC = () => {
 
     setInteractionHistory([initialInteraction]);
     setActiveApp(desktopApp);
-    setLlmContent('');
     setGenerationTimelineFrames([]);
     setError(null);
     setLatestEpisodeId(null);
@@ -1035,7 +1031,6 @@ const App: React.FC = () => {
       ];
       setInteractionHistory(newHistory);
 
-      setLlmContent('');
       setError(null);
       internalHandleLlmRequest(newHistory, styleConfig);
     },
