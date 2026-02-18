@@ -1,0 +1,19 @@
+/**
+ * Global layout reset for host shell.
+ * Without this, browser default body margin (8px) creates visible gaps
+ * around the custom title/header area.
+ */
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}

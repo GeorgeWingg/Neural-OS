@@ -249,6 +249,17 @@ function isTauriRuntime(): boolean {
   return '__TAURI_INTERNALS__' in window;
 }
 
+function getTauriTitleInsets(): { left: string; top: string } {
+  if (!isTauriRuntime()) {
+    return { left: '0px', top: '0px' };
+  }
+  // Keep text clear of macOS traffic lights and account for fullscreen/notch safe area.
+  return {
+    left: 'calc(72px + env(safe-area-inset-left, 0px))',
+    top: 'env(safe-area-inset-top, 0px)',
+  };
+}
+
 export const Window: React.FC<WindowProps> = ({
   title,
   children,
@@ -280,7 +291,7 @@ export const Window: React.FC<WindowProps> = ({
   const [contextStackExpanded, setContextStackExpanded] = useState(true);
   const [timelineExpanded, setTimelineExpanded] = useState(true);
   const menuBarRef = useRef<HTMLDivElement>(null);
-  const titleInset = isTauriRuntime() ? 64 : 0;
+  const titleInsets = getTauriTitleInsets();
   const hasDebugData = debugRecords.length > 0;
   const selectedDebugRecord = hasDebugData
     ? debugRecords[Math.max(0, Math.min(debugRecordOffset, debugRecords.length - 1))]
@@ -352,13 +363,16 @@ export const Window: React.FC<WindowProps> = ({
     <div className="w-full h-full bg-white/95 border border-gray-300 flex flex-col relative overflow-hidden font-sans">
       {/* Title Bar */}
       <div
-        data-tauri-drag-region
-        className="bg-gray-800/95 text-white py-2 px-4 font-semibold text-sm flex items-center select-none cursor-default flex-shrink-0 border-b border-gray-700"
+        className="bg-gray-800/95 text-white px-4 font-semibold text-sm flex items-center select-none cursor-default flex-shrink-0 border-b border-gray-700"
+        style={{
+          minHeight: `calc(40px + ${titleInsets.top})`,
+          paddingTop: titleInsets.top,
+        }}
       >
         <div
           data-tauri-drag-region
           className="flex items-center gap-2 w-[320px] max-w-[65vw] flex-none overflow-hidden"
-          style={{ paddingLeft: `${titleInset}px` }}
+          style={{ paddingLeft: titleInsets.left }}
         >
           <span data-tauri-drag-region className="tracking-wide uppercase text-xs truncate">
             {title}
