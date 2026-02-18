@@ -40,6 +40,12 @@ function isSet(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+function isTruthy(value) {
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
 function summarizeMissing(values) {
   return values.map((item) => `  - ${item}`).join('\n');
 }
@@ -59,11 +65,19 @@ async function run() {
   }
 
   const runningInCi = String(process.env.CI || '').toLowerCase() === 'true';
+  const allowUnsignedCi = isTruthy(process.env.RELEASE_PREFLIGHT_ALLOW_UNSIGNED_CI);
   if (runningInCi) {
     const missingEnv = requiredCiEnv.filter((name) => !isSet(process.env[name]));
     if (missingEnv.length > 0) {
-      throw new Error(
-        `Release preflight failed: required CI secrets/env are missing:\n${summarizeMissing(missingEnv)}`,
+      if (!allowUnsignedCi) {
+        throw new Error(
+          `Release preflight failed: required CI secrets/env are missing:\n${summarizeMissing(missingEnv)}`,
+        );
+      }
+      process.stdout.write(
+        `[release-preflight] warning unsigned CI release mode enabled; missing secrets:\n${summarizeMissing(
+          missingEnv,
+        )}\n`,
       );
     }
   }

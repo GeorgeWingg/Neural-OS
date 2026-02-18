@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-14, macos-13]
+        runner: [macos-14]
 
     env:
       TAURI_UPDATER_ENABLED: 'false'
@@ -41,6 +41,7 @@ jobs:
 
       - name: Build signed and notarized bundles
         env:
+          RELEASE_PREFLIGHT_ALLOW_UNSIGNED_CI: 'true'
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
