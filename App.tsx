@@ -55,9 +55,6 @@ import {
 const SETTINGS_STORAGE_KEY = 'neural-computer-settings';
 const LLM_STORAGE_KEY = 'neural-computer-llm-config';
 const LOADING_UI_MIGRATION_KEY = 'neural-computer-loading-ui-default-v1';
-const LEGACY_SETTINGS_STORAGE_KEY = 'gemini-os-settings';
-const LEGACY_LLM_STORAGE_KEY = 'gemini-os-llm-config';
-const LEGACY_LOADING_UI_MIGRATION_KEY = 'gemini-os-loading-ui-default-v1';
 const MAX_DEBUG_RECORDS = 80;
 const MAX_GENERATION_TIMELINE_FRAMES = 700;
 type ProviderCatalogEntry = { providerId: string; models: { id: string; name: string }[] };
@@ -74,16 +71,8 @@ function mapScoreToEpisodeRating(score: number): EpisodeRating {
   return 'bad';
 }
 
-function readStorageValueWithLegacyMigration(primaryKey: string, legacyKey: string): string | null {
-  const primary = localStorage.getItem(primaryKey);
-  if (typeof primary === 'string') return primary;
-  const legacy = localStorage.getItem(legacyKey);
-  if (typeof legacy === 'string') {
-    localStorage.setItem(primaryKey, legacy);
-    localStorage.removeItem(legacyKey);
-    return legacy;
-  }
-  return null;
+function readStorageValue(primaryKey: string): string | null {
+  return localStorage.getItem(primaryKey);
 }
 
 function normalizeToolTier(toolTier: unknown): LLMConfig['toolTier'] {
@@ -211,8 +200,6 @@ const WINDOW_TITLE_PATTERNS: RegExp[] = [
   /<!--\s*WINDOW_TITLE\s*:\s*([\s\S]{1,120}?)\s*-->/i,
   /<meta[^>]*name=["']neural-computer-window-title["'][^>]*content=["']([^"']{1,120})["'][^>]*>/i,
   /<meta[^>]*content=["']([^"']{1,120})["'][^>]*name=["']neural-computer-window-title["'][^>]*>/i,
-  /<meta[^>]*name=["']gemini-os-window-title["'][^>]*content=["']([^"']{1,120})["'][^>]*>/i,
-  /<meta[^>]*content=["']([^"']{1,120})["'][^>]*name=["']gemini-os-window-title["'][^>]*>/i,
   /data-window-title\s*=\s*["']([^"']{1,120})["']/i,
 ];
 
@@ -290,7 +277,7 @@ const App: React.FC = () => {
 
   const [styleConfig, setStyleConfig] = useState<StyleConfig>(() => {
     try {
-      const stored = readStorageValueWithLegacyMigration(SETTINGS_STORAGE_KEY, LEGACY_SETTINGS_STORAGE_KEY);
+      const stored = readStorageValue(SETTINGS_STORAGE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);
         const parsedRecord = parsed && typeof parsed === 'object' ? (parsed as Partial<StyleConfig>) : {};
@@ -306,15 +293,13 @@ const App: React.FC = () => {
         // One-time migration: preserve explicit non-immersive choices, but move
         // implicit legacy defaults to code-stream mode.
         const migrationDone =
-          localStorage.getItem(LOADING_UI_MIGRATION_KEY) === '1' ||
-          localStorage.getItem(LEGACY_LOADING_UI_MIGRATION_KEY) === '1';
+          localStorage.getItem(LOADING_UI_MIGRATION_KEY) === '1';
         if (!migrationDone) {
           const hasSavedLoadingMode = Object.prototype.hasOwnProperty.call(parsedRecord, 'loadingUiMode');
           if (!hasSavedLoadingMode || parsedRecord.loadingUiMode === 'immersive') {
             merged.loadingUiMode = DEFAULT_STYLE_CONFIG.loadingUiMode;
           }
           localStorage.setItem(LOADING_UI_MIGRATION_KEY, '1');
-          localStorage.removeItem(LEGACY_LOADING_UI_MIGRATION_KEY);
         }
 
         return merged;
@@ -327,7 +312,7 @@ const App: React.FC = () => {
 
   const [llmConfig, setLlmConfig] = useState<LLMConfig>(() => {
     try {
-      const stored = readStorageValueWithLegacyMigration(LLM_STORAGE_KEY, LEGACY_LLM_STORAGE_KEY);
+      const stored = readStorageValue(LLM_STORAGE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);
         return normalizeLlmConfig(parsed);

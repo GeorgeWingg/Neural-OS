@@ -68,7 +68,7 @@ Common key names used in this codebase:
 
 Server port env override:
 
-- `NEURAL_COMPUTER_SERVER_PORT` (legacy fallback: `GEMINI_OS_SERVER_PORT`)
+- `NEURAL_COMPUTER_SERVER_PORT`
 
 ## Scripts
 

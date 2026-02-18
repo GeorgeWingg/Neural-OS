@@ -466,7 +466,7 @@ export const GeneratedContent: React.FC<GeneratedContentProps> = ({
   // postMessage listener for iframe interactions
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      if (event.data?.type !== 'neural-computer-interaction' && event.data?.type !== 'gemini-os-interaction') return;
+      if (event.data?.type !== 'neural-computer-interaction') return;
       if (event.source !== immersiveIframeRef.current?.contentWindow) return;
       if (event.data?.uiSessionId !== uiSessionId) return;
       if (event.data?.bridgeToken !== bridgeToken) return;

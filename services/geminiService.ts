@@ -101,9 +101,7 @@ function isTauriRuntime(): boolean {
 }
 
 function resolveApiOrigin(): string {
-  const envOrigin =
-    (import.meta as any)?.env?.VITE_NEURAL_COMPUTER_API_ORIGIN ||
-    (import.meta as any)?.env?.VITE_GEMINI_OS_API_ORIGIN;
+  const envOrigin = (import.meta as any)?.env?.VITE_NEURAL_COMPUTER_API_ORIGIN;
   if (typeof envOrigin === 'string' && envOrigin.trim().length > 0) {
     return envOrigin.trim().replace(/\/+$/, '');
   }

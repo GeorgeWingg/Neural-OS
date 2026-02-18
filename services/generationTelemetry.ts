@@ -6,19 +6,11 @@
 import { EpisodeRating, GenerationDiffSummary, GenerationMetrics, GenerationRecord } from '../types';
 
 const GENERATION_STORAGE_KEY = 'neural-computer-generations-v1';
-const LEGACY_GENERATION_STORAGE_KEY = 'gemini-os-generations-v1';
 const MAX_GENERATIONS = 240;
 const MAX_SNIPPET_CHARS = 20000;
 
 function readGenerationStorageRaw(): string | null {
-  const current = localStorage.getItem(GENERATION_STORAGE_KEY);
-  if (current) return current;
-  const legacy = localStorage.getItem(LEGACY_GENERATION_STORAGE_KEY);
-  if (legacy) {
-    localStorage.setItem(GENERATION_STORAGE_KEY, legacy);
-    localStorage.removeItem(LEGACY_GENERATION_STORAGE_KEY);
-  }
-  return legacy;
+  return localStorage.getItem(GENERATION_STORAGE_KEY);
 }
 
 function readRecords(): GenerationRecord[] {

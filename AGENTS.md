@@ -33,7 +33,7 @@ This means proper skills are file-backed and tool-readable, not just inline prom
 
 ## Required Runtime Capabilities for Proper Skills
 
-To implement skills correctly in Gemini OS on Pi:
+To implement skills correctly in Neural Computer on Pi:
 1. The backend agent must run with a real workspace path.
 2. The agent must be able to read skill files from that workspace/configured skill directories.
 3. File-read tooling must be available to the model path that executes skills.

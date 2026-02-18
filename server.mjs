@@ -46,8 +46,8 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
-function parseNumberEnv(primaryKey, legacyKey, fallback, { min = undefined, max = undefined } = {}) {
-	const rawValue = process.env[primaryKey] ?? process.env[legacyKey];
+function parseNumberEnv(key, fallback, { min = undefined, max = undefined } = {}) {
+	const rawValue = process.env[key];
 	let value = Number(rawValue);
 	if (!Number.isFinite(value)) value = fallback;
 	if (Number.isFinite(min)) value = Math.max(min, value);
@@ -55,8 +55,8 @@ function parseNumberEnv(primaryKey, legacyKey, fallback, { min = undefined, max 
 	return Math.floor(value);
 }
 
-function parsePathListEnv(primaryKey, legacyKey) {
-	const rawValue = process.env[primaryKey] ?? process.env[legacyKey];
+function parsePathListEnv(key) {
+	const rawValue = process.env[key];
 	if (!rawValue || typeof rawValue !== "string") return [];
 	return rawValue
 		.split(",")
@@ -66,7 +66,7 @@ function parsePathListEnv(primaryKey, legacyKey) {
 
 loadDotEnvFiles();
 
-const PORT = parseNumberEnv("NEURAL_COMPUTER_SERVER_PORT", "GEMINI_OS_SERVER_PORT", 8787, {
+const PORT = parseNumberEnv("NEURAL_COMPUTER_SERVER_PORT", 8787, {
 	min: 1,
 	max: 65535,
 });
@@ -75,7 +75,6 @@ const DEFAULT_PROVIDER = "google";
 const DEFAULT_MODEL = PREFERRED_MODEL;
 const TOOL_CMD_TIMEOUT_SEC = parseNumberEnv(
 	"NEURAL_COMPUTER_TOOL_CMD_TIMEOUT_SEC",
-	"GEMINI_OS_TOOL_CMD_TIMEOUT_SEC",
 	30,
 	{
 		min: 1,
@@ -89,33 +88,24 @@ const COMPACTION_SETTINGS = Object.freeze({
 });
 const EMIT_SCREEN_MAX_HTML_CHARS = parseNumberEnv(
 	"NEURAL_COMPUTER_EMIT_SCREEN_MAX_HTML_CHARS",
-	"GEMINI_OS_EMIT_SCREEN_MAX_HTML_CHARS",
 	240_000,
 	{ min: 16_000, max: 1_000_000 },
 );
 const EMIT_SCREEN_MAX_CALLS = parseNumberEnv(
 	"NEURAL_COMPUTER_EMIT_SCREEN_MAX_CALLS",
-	"GEMINI_OS_EMIT_SCREEN_MAX_CALLS",
 	24,
 	{ min: 1, max: 256 },
 );
 const UI_HISTORY_RETENTION_DAYS = parseNumberEnv(
 	"NEURAL_COMPUTER_UI_HISTORY_RETENTION_DAYS",
-	"GEMINI_OS_UI_HISTORY_RETENTION_DAYS",
 	21,
 	{ min: 1, max: 365 },
 );
 const EMIT_SCREEN_PARTIAL_MIN_CHAR_DELTA = 64;
 const EMIT_SCREEN_PARTIAL_MIN_INTERVAL_MS = 120;
 const DEFAULT_WORKSPACE_ROOT = "./workspace";
-const WORKSPACE_POLICY_ROOTS = parsePathListEnv(
-	"NEURAL_COMPUTER_WORKSPACE_POLICY_ROOTS",
-	"GEMINI_OS_WORKSPACE_POLICY_ROOTS",
-);
-const EXTRA_SKILL_DIRS = parsePathListEnv(
-	"NEURAL_COMPUTER_EXTRA_SKILL_DIRS",
-	"GEMINI_OS_EXTRA_SKILL_DIRS",
-);
+const WORKSPACE_POLICY_ROOTS = parsePathListEnv("NEURAL_COMPUTER_WORKSPACE_POLICY_ROOTS");
+const EXTRA_SKILL_DIRS = parsePathListEnv("NEURAL_COMPUTER_EXTRA_SKILL_DIRS");
 const BUNDLED_SKILLS_DIR = path.join(process.cwd(), "skills");
 const HOME_SKILLS_DIR = process.env.HOME ? path.join(process.env.HOME, ".codex", "skills") : "";
 const ONBOARDING_APP_CONTEXT = "onboarding_app";
