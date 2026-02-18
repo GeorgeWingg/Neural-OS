@@ -1,11 +1,13 @@
 <p align="center">
-  <img src="public/logo-mark.svg" alt="Neural OS logo" width="180" />
+  <img src="public/logo-mark.svg" alt="Neural Computer logo" width="180" />
 </p>
 
-# Neural OS
+# Neural Computer
 
-Neural OS is a local-first AI desktop app built with React + Tauri.
+Neural Computer is a local-first AI desktop app built with React + Tauri.
 It runs a local Node server for model orchestration/tools and a desktop shell for packaging.
+
+Website: [neural-computer.com](https://neural-computer.com)
 
 Note: the packaged app metadata is still named `Neural Computer` in `src-tauri/tauri.conf.json` and can be renamed separately.
 

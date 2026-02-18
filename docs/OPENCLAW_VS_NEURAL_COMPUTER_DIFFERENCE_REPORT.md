@@ -10,7 +10,7 @@ This report compares:
 4. Practical architectural differences and migration implications.
 
 Evidence sources are code and docs from:
-- `/Users/juno/Downloads/gemini-os-2`
+- `this repo root`
 - `/Users/juno/workspace/openclaw`
 
 ## Executive Summary
@@ -34,7 +34,7 @@ OpenClaw:
 - Reference: `/Users/juno/workspace/openclaw/docs/tools/skills.md:11`.
 
 Difference:
-- Gemini skill unit is an in-memory policy record.
+- Neural Computer skill unit is an in-memory policy record.
 - OpenClaw skill unit is a file-backed capability package.
 
 ### 2) Skill Discovery and Source of Truth
@@ -47,7 +47,7 @@ OpenClaw:
 - References: `/Users/juno/workspace/openclaw/docs/tools/skills.md:15`, `/Users/juno/workspace/openclaw/src/agents/skills/workspace.ts:125`, `/Users/juno/workspace/openclaw/src/agents/skills/workspace.ts:170`.
 
 Difference:
-- Gemini has no filesystem-based skill discovery path.
+- Neural Computer has no filesystem-based skill discovery path.
 - OpenClaw skill source is directory-scanned and precedence-controlled.
 
 ### 3) How Skills Enter Model Context
@@ -60,7 +60,7 @@ OpenClaw:
 - References: `/Users/juno/workspace/openclaw/docs/concepts/system-prompt.md:103`, `/Users/juno/workspace/openclaw/src/agents/system-prompt.ts:29`.
 
 Difference:
-- Gemini uses eager inline instruction injection.
+- Neural Computer uses eager inline instruction injection.
 - OpenClaw uses lazy, tool-mediated skill loading.
 
 ### 4) Skill Runtime Lifecycle and Refresh
@@ -75,7 +75,7 @@ OpenClaw:
 - References: `/Users/juno/workspace/openclaw/docs/tools/skills.md:105`, `/Users/juno/workspace/openclaw/src/agents/skills/refresh.ts:109`, `/Users/juno/workspace/openclaw/src/agents/skills/workspace.ts:234`.
 
 Difference:
-- Gemini experiments with policy status transitions.
+- Neural Computer experiments with policy status transitions.
 - OpenClaw operationalizes filesystem skill lifecycle and eligibility at load/run time.
 
 ### 5) Self-Improvement Mechanism
@@ -95,7 +95,7 @@ OpenClaw:
 - References: `/Users/juno/workspace/openclaw/docs/concepts/memory.md:39`, `/Users/juno/workspace/openclaw/src/auto-reply/reply/memory-flush.ts:78`, `/Users/juno/workspace/openclaw/src/auto-reply/reply/agent-runner-memory.ts:27`.
 
 Difference:
-- Gemini loop optimizes local skill metrics.
+- Neural Computer loop optimizes local skill metrics.
 - OpenClaw loop grows durable memory and recall.
 
 ### 6) Memory and Learning from Experience
@@ -112,7 +112,7 @@ OpenClaw:
 - References: `/Users/juno/workspace/openclaw/src/memory/manager.ts:175`, `/Users/juno/workspace/openclaw/src/memory/manager-sync-ops.ts:262`.
 
 Difference:
-- Gemini lacks durable semantic memory as a core learning substrate.
+- Neural Computer lacks durable semantic memory as a core learning substrate.
 - OpenClaw centers learning on persistent memory + retrieval.
 
 ### 7) Feedback Model
@@ -127,7 +127,7 @@ OpenClaw:
 - Reference: `/Users/juno/workspace/openclaw/docs/concepts/memory.md:31`.
 
 Difference:
-- Gemini has explicit UX feedback channel but low semantic bandwidth today.
+- Neural Computer has explicit UX feedback channel but low semantic bandwidth today.
 - OpenClaw has stronger persistence path but weaker direct UI rating channel.
 
 ### 8) Insights and Observability
@@ -140,7 +140,7 @@ OpenClaw:
 - References: `/Users/juno/workspace/openclaw/docs/tools/skills.md:188`, `/Users/juno/workspace/openclaw/docs/date-time.md:75`, `/Users/juno/workspace/openclaw/src/agents/tools/memory-tool.ts:41`.
 
 Difference:
-- Gemini observability is local and app-centric.
+- Neural Computer observability is local and app-centric.
 - OpenClaw observability is system-level and tool/runtime-centric.
 
 ### 9) Temporal/Datefulness
@@ -155,7 +155,7 @@ OpenClaw:
 - Reference: `/Users/juno/workspace/openclaw/docs/concepts/memory.md:21`.
 
 Difference:
-- Gemini has timestamps as metadata.
+- Neural Computer has timestamps as metadata.
 - OpenClaw encodes temporal structure in both prompt policy and memory layout.
 
 ## Practical Implications for This Repo
@@ -180,7 +180,7 @@ Difference:
 1. Treat filesystem `SKILL.md` packages as canonical skills; demote `AppSkill` to temporary runtime evaluation state only.
 2. Shift prompt strategy from inline full instructions to OpenClaw-style available-skills metadata + on-demand read.
 3. Add workspace-backed memory files and retrieval tools for durable learning.
-4. Keep Gemini’s strengths: preserve insights/quality scoring as an experimentation layer on top of Pi-style skills and memory.
+4. Keep Neural Computer’s strengths: preserve insights/quality scoring as an experimentation layer on top of Pi-style skills and memory.
 
 ## Notes
 This report compares current implemented behavior, not aspirational architecture.
